@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "skills": {
+    "backtesting-trading-strategies": {
+      "source": "jeremylongshore/claude-code-plugins-plus-skills",
+      "sourceType": "github",
+      "computedHash": "23aa3da222e91ca8fee575df979f6ea7ac1071a46badc3e310f921b7a258d83f"
+    },
+    "breadth-chart-analyst": {
+      "source": "tradermonty/claude-trading-skills",
+      "sourceType": "github",
+      "computedHash": "2218a56dcf80bb82ae82a1fe63385861cd79bc9bc3d694e7ef07bb3a23377908"
+    },
+    "trading-bot-architecture": {
+      "source": "sanctifiedops/solana-skills",
+      "sourceType": "github",
+      "computedHash": "ce90d9ff3e7fc5612d8e02d264c1e5bfad0d21dc21617053321029c2dab1f9c5"
+    },
+    "trading-strategist": {
+      "source": "kukapay/crypto-skills",
+      "sourceType": "github",
+      "computedHash": "595cea6aa3298c617ed41b2eca4ac119f4ab5795a20b1a41950cf65624dcca6f"
+    }
+  }
+}
