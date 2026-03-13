@@ -9,167 +9,132 @@ class ICTEngine:
         """
         self.fractal_period = fractal_period
 
+    def find_all_fractals(self, df):
+        """
+        Finds ALL ITH/ITL fractals in the dataframe regardless of FVGs.
+        """
+        fractals = []
+        for i in range(self.fractal_period, len(df) - self.fractal_period):
+            curr = df.iloc[i]
+            is_ith = True
+            is_itl = True
+            for p in range(1, self.fractal_period + 1):
+                if df.iloc[i-p]['High'] >= curr['High'] or df.iloc[i+p]['High'] >= curr['High']:
+                    is_ith = False
+                if df.iloc[i-p]['Low'] <= curr['Low'] or df.iloc[i+p]['Low'] <= curr['Low']:
+                    is_itl = False
+            
+            if is_ith:
+                fractals.append({'index': i, 'time': df.index[i], 'price': curr['High'], 'type': 'ITH'})
+            if is_itl:
+                fractals.append({'index': i, 'time': df.index[i], 'price': curr['Low'], 'type': 'ITL'})
+        return fractals
+
     def find_fvgs(self, df):
         """
-        Detects Bullish and Bearish Fair Value Gaps.
-        Bullish: Low(n) > High(n-2)
-        Bearish: High(n) < Low(n-2)
+        Implementation of SMC Document: fvg logic
+        Returns FVG type, Top, Bottom, and MitigatedIndex
         """
-        df = df.copy()
-        df['fvg_type'] = 0  # 1 for Bullish, -1 for Bearish
-        df['fvg_top'] = np.nan
-        df['fvg_bottom'] = np.nan
+        ohlc = df.rename(columns=str.lower)
+        n = len(ohlc)
         
-        # Bullish FVG
-        bullish_fvg = df['Low'] > df['High'].shift(2)
-        df.loc[bullish_fvg, 'fvg_type'] = 1
-        df.loc[bullish_fvg, 'fvg_top'] = df['Low']
-        df.loc[bullish_fvg, 'fvg_bottom'] = df['High'].shift(2)
-        
-        # Bearish FVG
-        bearish_fvg = df['High'] < df['Low'].shift(2)
-        df.loc[bearish_fvg, 'fvg_type'] = -1
-        df.loc[bearish_fvg, 'fvg_top'] = df['Low'].shift(2)
-        df.loc[bearish_fvg, 'fvg_bottom'] = df['High']
-        
-        return df
+        fvg = np.where(
+            (
+                (ohlc["high"].shift(1) < ohlc["low"].shift(-1))
+                & (ohlc["close"] > ohlc["open"])
+            )
+            | (
+                (ohlc["low"].shift(1) > ohlc["high"].shift(-1))
+                & (ohlc["close"] < ohlc["open"])
+            ),
+            np.where(ohlc["close"] > ohlc["open"], 1, -1),
+            np.nan,
+        )
 
-    def find_internal_fractals(self, df, fvg_index, fvg_top, fvg_bottom, fvg_type):
-        """
-        Finds ITH/ITL that form strictly INSIDE the FVG price range after its creation.
-        """
-        search_df = df.iloc[fvg_index+1:]
-        internal_fractals = []
-        
-        for i in range(self.fractal_period, len(search_df) - self.fractal_period):
-            idx = i + fvg_index + 1
-            curr_candle = df.iloc[idx]
-            
-            is_fractal = True
-            for p in range(1, self.fractal_period + 1):
-                if fvg_type == -1: # Bearish FVG, looking for ITH (High)
-                    if df.iloc[idx-p]['High'] >= curr_candle['High'] or df.iloc[idx+p]['High'] >= curr_candle['High']:
-                        is_fractal = False
-                        break
-                elif fvg_type == 1: # Bullish FVG, looking for ITL (Low)
-                    if df.iloc[idx-p]['Low'] <= curr_candle['Low'] or df.iloc[idx+p]['Low'] <= curr_candle['Low']:
-                        is_fractal = False
-                        break
-            
-            if is_fractal:
-                price = curr_candle['High'] if fvg_type == -1 else curr_candle['Low']
-                if fvg_bottom < price < fvg_top:
-                    internal_fractals.append({'index': idx, 'price': price, 'type': 'ITH' if fvg_type == -1 else 'ITL'})
-                    
-        return internal_fractals
+        top = np.where(
+            ~np.isnan(fvg),
+            np.where(
+                ohlc["close"] > ohlc["open"],
+                ohlc["low"].shift(-1),
+                ohlc["low"].shift(1),
+            ),
+            np.nan,
+        )
 
-    def detect_sweeps(self, df, internal_fractal, fvg_type):
-        """
-        Detects if price sweeps the internal fractal.
-        """
-        start_idx = internal_fractal['index'] + 1
-        fractal_price = internal_fractal['price']
-        
-        sweeps = []
-        for i in range(start_idx, len(df)):
-            if fvg_type == -1: # Bearish FVG, sweeping ITH
-                if df.iloc[i]['High'] > fractal_price and df.iloc[i]['Close'] < fractal_price:
-                    sweeps.append(i)
-            elif fvg_type == 1: # Bullish FVG, sweeping ITL
-                if df.iloc[i]['Low'] < fractal_price and df.iloc[i]['Close'] > fractal_price:
-                    sweeps.append(i)
-        return sweeps
+        bottom = np.where(
+            ~np.isnan(fvg),
+            np.where(
+                ohlc["close"] > ohlc["open"],
+                ohlc["high"].shift(1),
+                ohlc["high"].shift(-1),
+            ),
+            np.nan,
+        )
 
-    def detect_inversion(self, df, fvg_index, fvg_top, fvg_bottom, fvg_type, sweep_indices):
-        """
-        Detects if price closes through the FVG (Inversion) after a sweep.
-        """
-        if not sweep_indices:
-            return None
+        mitigated_index = np.zeros(n, dtype=np.int32)
+        for i in np.where(~np.isnan(fvg))[0]:
+            mask = np.zeros(n, dtype=bool)
+            if fvg[i] == 1:
+                if i + 2 < n:
+                    mask[i+2:] = ohlc["low"].iloc[i + 2 :] <= top[i]
+            elif fvg[i] == -1:
+                if i + 2 < n:
+                    mask[i+2:] = ohlc["high"].iloc[i + 2 :] >= bottom[i]
             
-        last_sweep_idx = sweep_indices[-1]
-        for i in range(last_sweep_idx + 1, len(df)):
-            if fvg_type == -1: # Bearish FVG -> Bullish Inversion
-                if df.iloc[i]['Close'] > fvg_top:
-                    return i # Entry Index
-            elif fvg_type == 1: # Bullish FVG -> Bearish Inversion
-                if df.iloc[i]['Close'] < fvg_bottom:
-                    return i # Entry Index
-        return None
+            if np.any(mask):
+                j = np.flatnonzero(mask)[0]
+                mitigated_index[i] = j
 
-    def get_consolidated_signals(self, df, fvg_index, fvg_top, fvg_bottom, fvg_type):
-        """
-        Consolidated signal detection for a single FVG.
-        """
-        search_df = df.iloc[fvg_index+1:]
-        extreme_fractal = None
-        has_sweep = False
-        sweep_idx = None
+        # Final DF
+        res = df.copy()
+        res['fvg_type'] = fvg
+        res['fvg_top'] = top
+        res['fvg_bottom'] = bottom
+        res['mitigated_index'] = np.where(np.isnan(fvg), np.nan, mitigated_index)
         
-        for i in range(self.fractal_period, len(search_df) - self.fractal_period):
-            idx = i + fvg_index + 1
-            curr_candle = df.iloc[idx]
-            
-            is_fractal = True
-            for p in range(1, self.fractal_period + 1):
-                if fvg_type == -1: # Bearish FVG
-                    if df.iloc[idx-p]['High'] >= curr_candle['High'] or df.iloc[idx+p]['High'] >= curr_candle['High']:
-                        is_fractal = False
-                        break
-                elif fvg_type == 1: # Bullish FVG
-                    if df.iloc[idx-p]['Low'] <= curr_candle['Low'] or df.iloc[idx+p]['Low'] <= curr_candle['Low']:
-                        is_fractal = False
-                        break
-            
-            if is_fractal:
-                price = curr_candle['High'] if fvg_type == -1 else curr_candle['Low']
-                if fvg_bottom < price < fvg_top:
-                    if extreme_fractal is None:
-                        extreme_fractal = {'price': price, 'index': idx}
-                    else:
-                        if fvg_type == -1: # Bearish FVG, extreme is highest
-                            if price > extreme_fractal['price']:
-                                extreme_fractal = {'price': price, 'index': idx}
-                        elif fvg_type == 1: # Bullish FVG, extreme is lowest
-                            if price < extreme_fractal['price']:
-                                extreme_fractal = {'price': price, 'index': idx}
-            
-            if extreme_fractal is not None:
-                if fvg_type == -1:
-                    if curr_candle['High'] > extreme_fractal['price'] and curr_candle['Close'] < extreme_fractal['price']:
-                        has_sweep = True
-                        sweep_idx = idx
-                elif fvg_type == 1:
-                    if curr_candle['Low'] < extreme_fractal['price'] and curr_candle['Close'] > extreme_fractal['price']:
-                        has_sweep = True
-                        sweep_idx = idx
-            
-            if has_sweep and extreme_fractal is not None:
-                if fvg_type == -1:
-                    if curr_candle['Close'] > fvg_top:
-                        return {
-                            'sweep_index': sweep_idx,
-                            'entry_index': idx,
-                            'sl_price': extreme_fractal['price'],
-                            'extreme_price': extreme_fractal['price']
-                        }
-                elif fvg_type == 1:
-                    if curr_candle['Close'] < fvg_bottom:
-                        return {
-                            'sweep_index': sweep_idx,
-                            'entry_index': idx,
-                            'sl_price': extreme_fractal['price'],
-                            'extreme_price': extreme_fractal['price']
-                        }
-                        
-            if fvg_type == -1:
-                if curr_candle['Close'] < fvg_bottom - (fvg_top - fvg_bottom) * 2:
-                    break
-            elif fvg_type == 1:
-                if curr_candle['Close'] > fvg_top + (fvg_top - fvg_bottom) * 2:
-                    break
-            
-        return None
+        return res
+
+    @classmethod
+    def ith_itl(cls, ohlc: pd.DataFrame, swing_highs_lows: pd.DataFrame, fvg_data: pd.DataFrame) -> pd.Series:
+        """
+        Implementation of SMC Document: ith_itl logic
+        ITH = Swing High inside an active Bearish FVG
+        ITL = Swing Low inside an active Bullish FVG
+        """
+        ith_itl = np.zeros(len(ohlc), dtype=np.int32)
+        
+        shl_val = swing_highs_lows["HighLow"].values
+        shl_level = swing_highs_lows["Level"].values
+        
+        fvg_val = fvg_data["fvg_type"].values
+        fvg_top = fvg_data["fvg_top"].values
+        fvg_bottom = fvg_data["fvg_bottom"].values
+        fvg_mitigated = fvg_data["mitigated_index"].values
+        
+        for i in range(len(ohlc)):
+            if shl_val[i] == 1:  # Swing High
+                # Check if this high formed inside an active Bearish FVG
+                for j in range(i):
+                    if fvg_val[j] == -1:  # Bearish FVG
+                        # Rule: FVG was still open (unmitigated) at the exact moment the Swing High reached into it
+                        is_active = np.isnan(fvg_mitigated[j]) or fvg_mitigated[j] == 0 or fvg_mitigated[j] >= i
+                        if is_active and (fvg_bottom[j] <= shl_level[i] <= fvg_top[j]):
+                            ith_itl[i] = 1  # Mark as ITH
+                            break
+                            
+            elif shl_val[i] == -1:  # Swing Low
+                # Check if this low formed inside an active Bullish FVG
+                for j in range(i):
+                    if fvg_val[j] == 1:  # Bullish FVG
+                        is_active = np.isnan(fvg_mitigated[j]) or fvg_mitigated[j] == 0 or fvg_mitigated[j] >= i
+                        if is_active and (fvg_bottom[j] <= shl_level[i] <= fvg_top[j]):
+                            ith_itl[i] = -1  # Mark as ITL
+                            break
+
+        # Convert zeros to NaN to keep data clean
+        ith_itl = np.where(ith_itl != 0, ith_itl, np.nan)
+
+        return pd.Series(ith_itl, name="ITH_ITL", index=ohlc.index)
 
     def get_current_status(self, df):
         """

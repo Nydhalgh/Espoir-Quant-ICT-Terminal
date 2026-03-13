@@ -83,25 +83,27 @@ with st.sidebar:
     with st.expander("📊 Market Selection", expanded=True):
         asset = st.selectbox("Symbol", ["Gold", "Nasdaq", "SP500"])
         timeframe = st.selectbox("Timeframe", ["M1", "M5", "M15", "M30", "H1", "H4", "D1"])
-        chart_type = st.radio("Primary Interface", ["💹 TradingView Live (Recommended)", "🚀 Quantitative Analysis"], horizontal=True)
+        
+        # If backtest was just run, we default to Quantitative view to see results
+        if 'last_bt_trades' in st.session_state and st.session_state.last_bt_trades:
+            default_index = 1
+        else:
+            default_index = 0
+            
+        chart_type = st.radio("Primary Interface", ["💹 TradingView Live", "🚀 Quantitative Analysis (Backtest View)"], index=default_index, horizontal=True)
         
         # Dynamic period options based on timeframe
         if timeframe == "M1":
-            period_options = ["1d", "3d", "7d"]
+            period_options = ["7d", "1d", "3d"] # Default to 7d for M1
         elif timeframe in ["M5", "M15", "M30"]:
-            period_options = ["7d", "30d", "60d"]
+            period_options = ["30d", "7d", "60d"] # Default to 30d
         else:
             period_options = ["60d", "6mo", "1y", "max"]
         
         period = st.selectbox("History Period", period_options)
 
-    with st.expander("📈 Indicators (Context)", expanded=True):
-        show_ema = st.checkbox("Show EMA 200 (Trend)", value=True)
-        show_rsi = st.checkbox("Show RSI (Momentum)", value=False)
-        
     with st.expander("🛡️ Risk Management", expanded=True):
         risk_pct = st.slider("Risk per Trade (%)", 0.5, 5.0, 1.0) / 100
-        trend_filter = st.checkbox("EMA 200 Trend Filter", value=False, help="Only Long above EMA 200, Only Short below.")
         show_rr_tool = st.checkbox("Show R:R Visual Tool", value=True)
         
     with st.expander("🧠 Strategy Legend", expanded=False):
@@ -189,73 +191,112 @@ if df is not None and not df.empty:
     # 2. Process ICT Logic
     df_with_fvgs = st.session_state.engine.find_fvgs(df)
     
-    # 2.2 Process TA Context Indicators
-    if show_ema:
-        df['ema_200'] = ta.ema(df['Close'], length=200)
-    if show_rsi:
-        df['rsi'] = ta.rsi(df['Close'], length=14)
-    
     # 2.5 Process HTF FVGs
     htf_fvgs_dict = {}
     for tf, hdf in htf_dfs.items():
         if not hdf.empty:
             htf_fvgs_dict[tf] = st.session_state.engine.find_fvgs(hdf)
 
-    # 3. Detect Signal Chain (FVG -> Internal Fractal -> Sweep -> iFVG)
+    # 3. Detect Signal Chain (HTF Sweep -> M1 iFVG Entry)
     all_signals = []
+    global_entries = []
     markers = []
+    extra_series = []
+    time_offset = 3600 # UTC+1
+    end_t = int(df.index[-1].timestamp()) + time_offset
+
+    # 3.0 Process HTF Levels & Sweeps (M15, M30, H1)
+    htf_sweeps = [] # Store historical sweeps: {'time': ts, 'type': 'long'/'short'}
     
-    # Analyze all detected FVGs for current timeframe
-    active_fvgs = df_with_fvgs[df_with_fvgs['fvg_type'] != 0]
-    
-    for idx, row in active_fvgs.iterrows():
-        fvg_idx = df.index.get_loc(idx)
-        top = row['fvg_top']
-        bottom = row['fvg_bottom']
-        fvg_type = row['fvg_type']
+    for tf, hdf in htf_dfs.items():
+        if hdf.empty: continue
         
-        # Use Consolidated Signal Detection
-        signal = st.session_state.engine.get_consolidated_signals(
-            df, fvg_idx, top, bottom, fvg_type
-        )
+        # 1. Find ALL fractals on this HTF
+        htf_fractals = st.session_state.engine.find_all_fractals(hdf)
         
-        if signal:
-            # Trend Filter Logic
-            is_valid = True
-            if trend_filter and 'ema_200' in df.columns:
-                ema_val = df.iloc[signal['entry_index']]['ema_200']
-                if not pd.isna(ema_val):
-                    if fvg_type == -1 and df.iloc[signal['entry_index']]['Close'] < ema_val: # Long Entry
-                        is_valid = False
-                    elif fvg_type == 1 and df.iloc[signal['entry_index']]['Close'] > ema_val: # Short Entry
-                        is_valid = False
+        for frac in htf_fractals:
+            # Draw HTF level line (only for recent ones to avoid visual clutter)
+            if frac['time'] > df.index[-1] - pd.Timedelta(days=2):
+                extra_series.append({
+                    "type": "Line",
+                    "data": [
+                        {"time": int(frac['time'].timestamp()) + time_offset, "value": float(frac['price'])},
+                        {"time": end_t, "value": float(frac['price'])}
+                    ],
+                    "options": {
+                        "color": "rgba(155, 89, 182, 0.6)" if frac['type'] == 'ITH' else "rgba(52, 152, 219, 0.6)",
+                        "lineWidth": 1, "lineStyle": 2, "title": f"{tf} {frac['type']}"
+                    }
+                })
             
-            if is_valid:
-                # 1. Add Marker for the Sweep
-                markers.append({
-                    "time": int(df.index[signal['sweep_index']].timestamp()),
-                    "position": "aboveBar" if fvg_type == -1 else "belowBar",
-                    "color": "#f1c40f",
-                    "shape": "circle",
-                    "text": "S"
-                })
-                
-                # 2. Add Marker for the Entry
-                markers.append({
-                    "time": int(df.index[signal['entry_index']].timestamp()),
-                    "position": "belowBar" if fvg_type == -1 else "aboveBar",
-                    "color": "#2ecc71" if fvg_type == -1 else "#e74c3c",
-                    "shape": "arrowUp" if fvg_type == -1 else "arrowDown",
-                    "text": "iFVG Entry"
-                })
-                
-                # 3. Add to Signal List for Backtester
+            # 2. Identify all historical sweeps of this fractal
+            hdf_after = hdf.iloc[frac['index']+1:]
+            for hs_time, hs_row in hdf_after.iterrows():
+                if frac['type'] == 'ITH': # Potential Short
+                    if hs_row['High'] > frac['price'] and hs_row['Close'] < frac['price']:
+                        htf_sweeps.append({'time': hs_time, 'type': 'short'})
+                else: # Potential Long
+                    if hs_row['Low'] < frac['price'] and hs_row['Close'] > frac['price']:
+                        htf_sweeps.append({'time': hs_time, 'type': 'long'})
+
+    # 3.1 Calculate M1 Entries (The "Global Confirmation") across all history
+    m1_df = htf_dfs.get('M1', df if timeframe == 'M1' else pd.DataFrame())
+    if not m1_df.empty:
+        m1_ifvgs = st.session_state.engine.find_ifvgs(m1_df)
+        
+        for i_time, i_row in m1_ifvgs.iterrows():
+            if i_row['ifvg_type'] == 0: continue
+            
+            # Search for a valid HTF sweep that occurred before this M1 iFVG (within 12h)
+            for sweep in htf_sweeps:
+                time_diff = i_time - sweep['time']
+                if pd.Timedelta(0) < time_diff < pd.Timedelta(hours=12):
+                    if sweep['type'] == 'long' and i_row['ifvg_type'] == 1:
+                        global_entries.append({'time': i_time, 'price': i_row['Close'], 'type': 'LONG'})
+                        break # One entry per iFVG
+                    elif sweep['type'] == 'short' and i_row['ifvg_type'] == -1:
+                        global_entries.append({'time': i_time, 'price': i_row['Close'], 'type': 'SHORT'})
+                        break
+
+    # 3.2 Plot Global Entries on Current Chart
+    for entry in global_entries:
+        # Show all entries that fit in the current loaded data range
+        if entry['time'] >= df.index[0] and entry['time'] <= df.index[-1]:
+            markers.append({
+                "time": int(entry['time'].timestamp()) + time_offset,
+                "position": "belowBar" if entry['type'] == 'LONG' else "aboveBar",
+                "color": "#2ecc71" if entry['type'] == 'LONG' else "#e74c3c",
+                "shape": "arrowUp" if entry['type'] == 'LONG' else "arrowDown",
+                "text": f"M1 {entry['type']}"
+            })
+            
+            # Add to backtest signals
+            try:
+                idx_pos = df.index.get_indexer([entry['time']], method='nearest')[0]
                 all_signals.append({
-                    'entry_index': signal['entry_index'],
-                    'sl_price': signal['sl_price'],
-                    'fvg_type': fvg_type,
+                    'entry_index': idx_pos,
+                    'sl_price': df.iloc[idx_pos]['Low'] if entry['type'] == 'LONG' else df.iloc[idx_pos]['High'],
+                    'fvg_type': -1 if entry['type'] == 'LONG' else 1,
                     'asset': asset
                 })
+            except: pass
+
+    # 3.3 FVG Rendering (Selected TF Only)
+    active_fvgs = df_with_fvgs[df_with_fvgs['fvg_type'] != 0].tail(5)
+    for idx, row in active_fvgs.iterrows():
+        start_t = int(idx.timestamp()) + time_offset
+        color = "rgba(155, 89, 182, 0.1)" if row['fvg_type'] == 1 else "rgba(243, 156, 18, 0.1)"
+        extra_series.append({
+            "type": "Baseline",
+            "data": [{"time": start_t, "value": float(row['fvg_top'])}, {"time": end_t, "value": float(row['fvg_top'])}],
+            "options": {
+                "baseValue": {"type": "price", "price": float(row['fvg_bottom'])},
+                "topFillColor1": color, "topFillColor2": color,
+                "lineWidth": 1, "priceLineVisible": False, "lastValueVisible": False
+            }
+        })
+
+    # 4. Results Display (Old logic follows...)
 
     # 4. Results Display
     if run_backtest:
@@ -320,6 +361,7 @@ if df is not None and not df.empty:
         tv_col, signal_col = st.columns([3, 1])
         
         with tv_col:
+            st.info("💡 Note: ICT Logic (FVGs, Sweeps, R:R Tools) are only visible in the '🚀 Quantitative Analysis' tab. See the 'Live Signal Tracker' on the right for current setups.")
             tv_symbol = "OANDA:XAUUSD" if asset == "Gold" else ("NASDAQ:NDX" if asset == "Nasdaq" else "CME_MINI:ES1!")
             tv_html = f"""
             <div class="tradingview-widget-container" style="height:650px;width:100%">
@@ -374,53 +416,11 @@ if df is not None and not df.empty:
     else:
         st.subheader("🚀 High-Fidelity Quantitative Terminal")
         
-        # Time offset for UTC+1
-        time_offset = 3600
+        # Candles already prepared? No, need to prepare them here for correct TF
         candles = st.session_state.chart_viz.prepare_candles(df, time_offset=time_offset)
         
-        # Sync markers
-        chart_markers = []
-        for m in markers:
-            m_copy = m.copy()
-            m_copy['time'] = m_copy['time'] + time_offset
-            chart_markers.append(m_copy)
-            
-        extra_series = []
+        # Sync markers (already in markers list from the loop)
         
-        # 1. HTF FVGs
-        for tf, hdf_fvgs in htf_fvgs_dict.items():
-            recent_htf = hdf_fvgs[hdf_fvgs['fvg_type'] != 0].tail(3)
-            for h_idx, h_fvg in recent_htf.iterrows():
-                h_start, h_end = int(h_idx.timestamp()) + time_offset, int(df.index[-1].timestamp()) + time_offset
-                h_color = "rgba(155, 89, 182, 0.1)" if h_fvg['fvg_type'] == 1 else "rgba(243, 156, 18, 0.1)"
-                h_border = "rgba(155, 89, 182, 0.3)" if h_fvg['fvg_type'] == 1 else "rgba(243, 156, 18, 0.3)"
-                extra_series.append({
-                    "type": "Baseline",
-                    "data": [{"time": h_start, "value": float(h_fvg['fvg_top'])}, {"time": h_end, "value": float(h_fvg['fvg_top'])}],
-                    "options": {
-                        "baseValue": {"type": "price", "price": float(h_fvg['fvg_bottom'])},
-                        "topFillColor1": h_color, "topFillColor2": h_color,
-                        "topLineColor": h_border, "bottomLineColor": h_border,
-                        "lineWidth": 1, "priceLineVisible": False, "lastValueVisible": False
-                    }
-                })
-
-        # 2. LTF FVGs
-        for idx, fvg in active_fvgs.tail(10).iterrows():
-            start_t, end_t = int(idx.timestamp()) + time_offset, int(df.index[-1].timestamp()) + time_offset
-            color = "rgba(155, 89, 182, 0.2)" if fvg['fvg_type'] == 1 else "rgba(243, 156, 18, 0.2)"
-            border = "rgba(155, 89, 182, 0.4)" if fvg['fvg_type'] == 1 else "rgba(243, 156, 18, 0.4)"
-            extra_series.append({
-                "type": "Baseline",
-                "data": [{"time": start_t, "value": float(fvg['fvg_top'])}, {"time": end_t, "value": float(fvg['fvg_top'])}],
-                "options": {
-                    "baseValue": {"type": "price", "price": float(fvg['fvg_bottom'])},
-                    "topFillColor1": color, "topFillColor2": color,
-                    "topLineColor": border, "bottomLineColor": border,
-                    "lineWidth": 1, "priceLineVisible": False, "lastValueVisible": False
-                }
-            })
-
         # 3. R:R Tool
         if show_rr_tool and 'last_bt_trades' in st.session_state:
             for trade in st.session_state.last_bt_trades[-10:]:
@@ -428,7 +428,7 @@ if df is not None and not df.empty:
                 if trade['entry_time'] not in df.index: continue
                 e_p, sl_p, tp_p, is_l = float(trade['entry_price']), float(trade['sl_price']), float(trade['tp_price']), trade['fvg_type'] == -1
                 
-                chart_markers.append({"time": t_x, "position": "aboveBar" if trade['outcome']=='TP' else "belowBar", 
+                markers.append({"time": t_x, "position": "aboveBar" if trade['outcome']=='TP' else "belowBar", 
                                 "color": "#26a69a" if trade['outcome']=='TP' else "#ef5350", "shape": "star", "text": f"R:R {trade['outcome']}"})
                 
                 tr_mask = (df.index >= trade['entry_time']) & (df.index <= trade['exit_time'])
@@ -461,12 +461,12 @@ if df is not None and not df.empty:
                     }
                 })
 
-        # Indicators
-        if show_ema and 'ema_200' in df.columns:
-            extra_series.append({"type": "Line", "data": [{"time": int(t.timestamp()) + time_offset, "value": float(v)} for t, v in df['ema_200'].dropna().items()], "options": {"color": "#f1c40f", "lineWidth": 2, "title": "EMA 200"}})
-        
-        rsi_s = [{"time": int(t.timestamp()) + time_offset, "value": float(v)} for t, v in df['rsi'].dropna().items()] if show_rsi and 'rsi' in df.columns else None
-        st.session_state.chart_viz.render(candles, series_data=extra_series, markers=chart_markers, rsi_data=rsi_s, key='main_chart')
+        # Render chart
+        try:
+            st.session_state.chart_viz.render(candles, series_data=extra_series, markers=markers, key='main_chart_big')
+        except Exception as e:
+            st.error(f"⚠️ Chart Rendering Error: {e}")
+            st.session_state.chart_viz.render(candles, markers=markers, key='fallback_chart_big')
 
 
 else:
