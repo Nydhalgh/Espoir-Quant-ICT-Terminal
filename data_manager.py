@@ -22,33 +22,32 @@ class DataManager:
     def fetch_data(self, asset_name, timeframe_name, period="60d"):
         """
         Fetches historical data for a given asset and timeframe.
-        yfinance supports up to 60 days of intraday data for 1m/5m/15m/30m/60m.
         """
         symbol = self.symbols.get(asset_name)
-        
-        # Mapping timeframe_name to yfinance interval
         interval = self.timeframes.get(timeframe_name)
         
-        # Enforce yfinance limits for intraday data
+        # Enforce yfinance limits
         if timeframe_name == "M1":
             interval = "1m"
-            # Cap period at 7 days for 1m
             if any(x in period for x in ["30d", "60d", "6mo", "1y", "max"]):
                 period = "7d"
         elif timeframe_name in ["M5", "M15", "M30"]:
-            # Cap period at 60 days for 5m-30m
             if any(x in period for x in ["6mo", "1y", "max"]):
                 period = "60d"
         elif timeframe_name in ["H1", "H4"]:
-            interval = "1h" # Fetch 1h and resample for H4
-            # Cap period at 730 days for 1h
+            interval = "1h"
             if any(x in period for x in ["1y", "max"]):
-                period = "60d" # Actually yfinance 1h can go up to 2y but 60d is safer/faster
+                period = "60d"
             
         if not symbol or not interval:
             raise ValueError(f"Invalid asset {asset_name} or timeframe {timeframe_name}")
 
-        df = yf.download(symbol, period=period, interval=interval, progress=False)
+        try:
+            # DISABLE internal yfinance threads to prevent deadlocks in Streamlit
+            df = yf.download(symbol, period=period, interval=interval, progress=False, threads=False)
+        except Exception as e:
+            print(f"[ERROR] yfinance failed for {symbol} ({timeframe_name}): {e}")
+            return pd.DataFrame()
         
         if df is None or df.empty:
             return pd.DataFrame()
