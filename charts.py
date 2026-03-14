@@ -61,29 +61,34 @@ class ChartVisualizer:
     def render(self, candles, series_data=[], markers=[], rsi_data=None, key=None):
         """
         Renders the final chart with optional indicator panes.
+        Note: We add extra series (background boxes) BEFORE the candles 
+        so the candles are drawn on top.
         """
-        # Main series
-        main_series = [
-            {
-                "type": "Candlestick",
-                "data": candles,
-                "options": {
-                    "upColor": "#26a69a",
-                    "downColor": "#ef5350",
-                },
-                "markers": markers
-            }
-        ]
+        main_series = []
         
-        # Add extra series (FVGs etc)
+        # 1. Add extra series (Session Boxes, FVGs, Levels) FIRST
         for s in series_data:
             main_series.append(s)
+            
+        # 2. Add Candlesticks LAST so they appear on top
+        main_series.append({
+            "type": "Candlestick",
+            "data": candles,
+            "options": {
+                "upColor": "#26a69a",
+                "downColor": "#ef5350",
+                "borderVisible": False,
+                "wickUpColor": "#26a69a",
+                "wickDownColor": "#ef5350",
+            },
+            "markers": markers
+        })
 
-        # Single chart config - Increased height to 900 for full screen feel
+        # Single chart config - Height at 900 for professional feel
         chart_config = {
             "chart": {**self.chart_options, "height": 900},
             "series": main_series
         }
 
-        # Wrap in list - standard for multi-pane or single pane
+        # Wrap in list
         return renderLightweightCharts([chart_config], key=str(key) if key else "main")

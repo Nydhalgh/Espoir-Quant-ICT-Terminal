@@ -139,10 +139,15 @@ with st.sidebar:
     st.markdown("---")
     st.subheader("📡 Live Terminal")
     live_mode = st.toggle("Live Polling (60s)", value=False)
-    if live_mode:
-        st.info("🔄 Polling Market Every 60s...")
-        time.sleep(60)
-        st.rerun()
+
+    st.markdown("---")
+    with st.expander("🛠️ System Diagnostics", expanded=False):
+        if 'diagnostics' in st.session_state:
+            for d in st.session_state.diagnostics[-10:]:
+                st.caption(f"⏱️ {d}")
+        if st.button("Clear Diagnostics"):
+            st.session_state.diagnostics = []
+            st.rerun()
 
     st.markdown("---")
     st.caption("🚀 Data: Yahoo Finance (Real-time 1m for Futures)")
@@ -163,36 +168,57 @@ if col_status.button("ℹ️ Help"):
     4.  **Confirmation:** Enter when price closes on the opposite side of the FVG (Inversion).
     """)
 
-# 1. Fetch Data
 @st.cache_data(ttl=3600, show_spinner="🛒 Sourcing Market Data...")
 def load_data(asset, timeframe, period):
+    start_time = time.time()
     # Fetch primary data
+    print(f"[DIAGNOSTIC] Fetching primary data: {asset} {timeframe} ({period})")
     df = st.session_state.data_manager.fetch_data(asset, timeframe, period)
     
-    # Fetch HTF data for background analysis in parallel
+    # Fetch HTF data + ALWAYS fetch M1 for execution signals
     htf_data = {}
-    target_tfs = []
-    if timeframe in ["M1", "M5"]:
-        target_tfs = ["M15", "M30", "H1"]
+    target_tfs = ["M1"] # Always include M1
+    
+    if timeframe == "M1":
+        target_tfs = ["M5", "M15", "M30", "H1"]
+    elif timeframe == "M5":
+        target_tfs = ["M1", "M15", "M30", "H1"]
     elif timeframe == "M15":
-        target_tfs = ["M30", "H1"]
+        target_tfs = ["M1", "M30", "H1"]
+    elif timeframe in ["M30", "H1"]:
+        target_tfs = ["M1", "H1" if timeframe == "M30" else "M30"]
+    
+    # Remove current timeframe from background targets
+    target_tfs = [t for t in target_tfs if t != timeframe]
     
     if target_tfs:
+        print(f"[DIAGNOSTIC] Fetching background data in parallel: {target_tfs}")
         with ThreadPoolExecutor(max_workers=len(target_tfs)) as executor:
             future_to_tf = {executor.submit(st.session_state.data_manager.fetch_data, asset, tf, period): tf for tf in target_tfs}
             for future in future_to_tf:
                 tf = future_to_tf[future]
-                htf_data[tf] = future.result()
-            
+                try:
+                    htf_data[tf] = future.result(timeout=30)
+                except Exception as e:
+                    print(f"[DIAGNOSTIC] Timeout or Error fetching {tf}: {e}")
+                    htf_data[tf] = pd.DataFrame()
+    
+    end_time = time.time()
+    msg = f"Data Loading took {end_time - start_time:.2f}s for {asset} {timeframe}"
+    if 'diagnostics' not in st.session_state: st.session_state.diagnostics = []
+    st.session_state.diagnostics.append(msg)
     return df, htf_data
 
 @st.cache_data(ttl=600, show_spinner="🧠 Analyzing MTF Signals...")
 def compute_cached_signals(asset, timeframe, _df, _htf_dfs):
-    """
-    Caches the heavy engine analysis. 
-    We use the length of the dataframe as part of the key to detect new candles.
-    """
-    return st.session_state.engine.compute_mtf_signals(_df, _htf_dfs, timeframe)
+    start_time = time.time()
+    res = st.session_state.engine.compute_mtf_signals(_df, _htf_dfs, timeframe)
+    end_time = time.time()
+    msg = f"MTF Signal Analysis took {end_time - start_time:.2f}s"
+    if 'diagnostics' not in st.session_state: st.session_state.diagnostics = []
+    st.session_state.diagnostics.append(msg)
+    print(f"[DIAGNOSTIC] {msg}")
+    return res
 
 df, htf_dfs = load_data(asset, timeframe, period)
 
@@ -230,19 +256,20 @@ if df is not None and not df.empty:
     time_offset = 3600 # UTC+1
     end_t = int(df.index[-1].timestamp()) + time_offset
 
-    # Session Boxes (As background shading)
+    # Session Boxes (As background shading - Moved to Left Scale to fix zooming)
     sessions = st.session_state.engine.get_sessions(df)
+    y_min, y_max = float(df['Low'].min()), float(df['High'].max())
     for sess in sessions:
         sess_start = int(sess['start'].timestamp()) + time_offset
         sess_end = int(sess['end'].timestamp()) + time_offset
-        # We use a Baseline series that covers a very wide range to simulate a vertical box
         extra_series.append({
             "type": "Baseline",
-            "data": [{"time": sess_start, "value": 100000}, {"time": sess_end, "value": 100000}],
+            "data": [{"time": sess_start, "value": y_max}, {"time": sess_end, "value": y_max}],
             "options": {
-                "baseValue": {"type": "price", "price": 0},
+                "baseValue": {"type": "price", "price": y_min},
                 "topFillColor1": sess['color'], "topFillColor2": sess['color'],
-                "lineWidth": 0, "priceLineVisible": False, "lastValueVisible": False
+                "lineWidth": 0, "priceLineVisible": False, "lastValueVisible": False,
+                "priceScaleId": "left" # IMPORTANT: Prevents squashing the main price scale
             }
         })
 
@@ -251,12 +278,22 @@ if df is not None and not df.empty:
     global_entries = mtf_results['global_entries']
     htf_levels = mtf_results['htf_levels']
 
-    # 3.1 Plot HTF Levels (Limited to recent 48h and formal SMC logic)
+    # 3.1 Plot Levels (HTF + Primary)
+    # Filter for alerts: Current day, Current TF, London Open to NY Close
+    ith_itl_alerts = []
+    current_day = df.index[-1].date()
+    
     for level in htf_levels:
         if pd.isna(level['price']): continue
         
-        # Draw HTF level line (only for recent ones to avoid visual clutter)
-        if level['time'] > df.index[-1] - pd.Timedelta(days=2):
+        is_p = level.get('is_primary', False)
+        
+        # Draw level line if within 7 days
+        if level['time'] > df.index[-1] - pd.Timedelta(days=7):
+            color = "rgba(155, 89, 182, 0.9)" if level['type'] == 'ITH' else "rgba(52, 152, 219, 0.9)"
+            if not is_p: # HTF levels are slightly more transparent
+                color = color.replace("0.9", "0.4")
+                
             extra_series.append({
                 "type": "Line",
                 "data": [
@@ -264,32 +301,52 @@ if df is not None and not df.empty:
                     {"time": end_t, "value": float(level['price'])}
                 ],
                 "options": {
-                    "color": "rgba(155, 89, 182, 0.6)" if level['type'] == 'ITH' else "rgba(52, 152, 219, 0.6)",
-                    "lineWidth": 1, "lineStyle": 2, "title": f"{level['tf']} {level['type']}"
+                    "color": color,
+                    "lineWidth": 2 if is_p else 1, 
+                    "lineStyle": 0 if is_p else 2, 
+                    "title": f"{level['tf']} {level['type']}"
                 }
             })
+            
+        # Collect alerts for primary TF, current day, and London-NY window
+        if is_p and level['time'].date() == current_day:
+            hour = level['time'].hour
+            if 7 <= hour < 20: # London Open (7) to NY Close (20)
+                ith_itl_alerts.append(level)
 
-    # 3.2 Plot Global Entries on Current Chart
+    # 3.2 Plot Global Entries on Current Chart (Session Only)
     for entry in global_entries:
         if entry['time'] >= df.index[0] and entry['time'] <= df.index[-1]:
-            markers.append({
-                "time": int(entry['time'].timestamp()) + time_offset,
-                "position": "belowBar" if entry['type'] == 'LONG' else "aboveBar",
-                "color": "#2ecc71" if entry['type'] == 'LONG' else "#e74c3c",
-                "shape": "arrowUp" if entry['type'] == 'LONG' else "arrowDown",
-                "text": f"M1 {entry['type']}"
-            })
+            # Session Filter: London Open (7) to NY Close (20)
+            hour = entry['time'].hour
+            is_in_session = 7 <= hour < 20
             
-            # Add to backtest signals
-            try:
-                idx_pos = df.index.get_indexer([entry['time']], method='nearest')[0]
-                all_signals.append({
-                    'entry_index': idx_pos,
-                    'sl_price': df.iloc[idx_pos]['Low'] if entry['type'] == 'LONG' else df.iloc[idx_pos]['High'],
-                    'fvg_type': -1 if entry['type'] == 'LONG' else 1,
-                    'asset': asset
-                })
-            except: pass
+            if is_in_session:
+                try:
+                    # Find the corresponding candle on the CURRENT timeframe (M1, M5, M15, etc)
+                    # method='pad' ensures we pick the HTF candle that contains this M1 signal
+                    idx_pos = df.index.get_indexer([entry['time']], method='pad')[0]
+                    if idx_pos == -1: continue
+                    
+                    all_signals.append({
+                        'entry_index': idx_pos,
+                        'sl_price': df.iloc[idx_pos]['Low'] if entry['type'] == 'LONG' else df.iloc[idx_pos]['High'],
+                        'fvg_type': -1 if entry['type'] == 'LONG' else 1,
+                        'asset': asset
+                    })
+                    
+                    # Align marker time to the actual chart timestamp
+                    aligned_time = int(df.index[idx_pos].timestamp()) + time_offset
+                    
+                    markers.append({
+                        "time": aligned_time,
+                        "position": "belowBar" if entry['type'] == 'LONG' else "aboveBar",
+                        "color": "#2ecc71" if entry['type'] == 'LONG' else "#e74c3c",
+                        "shape": "arrowUp" if entry['type'] == 'LONG' else "arrowDown",
+                        "text": f"{entry['type']} ENTRY",
+                        "size": 2 # Make arrows larger
+                    })
+                except: pass
 
     # 3.3 FVG Rendering (Selected TF Only)
     active_fvgs = df_with_fvgs[df_with_fvgs['fvg_type'].isin([1, -1])].tail(5)
@@ -404,7 +461,24 @@ if df is not None and not df.empty:
             components.html(tv_html, height=650)
             
         with signal_col:
-            st.markdown("### 🎯 ICT Live Signals")
+            st.markdown("### 🔔 ITH/ITL Alerts")
+            st.caption(f"Current TF: {timeframe} | Session Only")
+            
+            if ith_itl_alerts:
+                for alt in ith_itl_alerts[-5:][::-1]: # Show last 5
+                    with st.container():
+                        st.markdown(f"""
+                        <div style="background-color: #1e222d; padding: 12px; border-radius: 8px; margin-bottom: 8px; border-left: 4px solid {'#9b59b6' if alt['type'] == 'ITH' else '#3498db'}">
+                            <p style="margin: 0; font-size: 0.85em; color: {'#9b59b6' if alt['type'] == 'ITH' else '#3498db'}; font-weight: bold;">{alt['type']} DETECTED</p>
+                            <p style="margin: 2px 0; font-size: 1.1em; color: white; font-weight: bold;">{alt['price']:.2f}</p>
+                            <p style="margin: 0; font-size: 0.75em; color: #d1d4dc;">{alt['time'].strftime('%H:%M')} | {alt['tf']}</p>
+                        </div>
+                        """, unsafe_allow_html=True)
+            else:
+                st.info("No session levels detected for today.")
+
+            st.markdown("---")
+            st.markdown("### 🎯 ICT Entry Signals")
             st.caption("Auto-detected via Quant Engine")
             
             if all_signals:
@@ -423,9 +497,10 @@ if df is not None and not df.empty:
             else:
                 st.info("Searching for setups...")
 
-    else:
+    if "Quantitative" in chart_type:
         st.subheader("🚀 High-Fidelity Quantitative Terminal")
         
+        start_prep = time.time()
         candles = st.session_state.chart_viz.prepare_candles(df, time_offset=time_offset)
         
         if show_rr_tool and 'last_bt_trades' in st.session_state:
@@ -434,6 +509,7 @@ if df is not None and not df.empty:
                 if trade['entry_time'] not in df.index: continue
                 e_p, sl_p, tp_p, is_l = float(trade['entry_price']), float(trade['sl_price']), float(trade['tp_price']), trade['fvg_type'] == -1
                 
+                # Markers on all timeframes
                 markers.append({"time": t_x, "position": "aboveBar" if trade['outcome']=='TP' else "belowBar", 
                                 "color": "#26a69a" if trade['outcome']=='TP' else "#ef5350", "shape": "star", "text": f"R:R {trade['outcome']}"})
                 
@@ -467,23 +543,25 @@ if df is not None and not df.empty:
                     }
                 })
 
-        # Final Sanitization
+        # Final Sanitization & Single Render
         clean_candles = safe_json_serialize(candles)
         clean_series = safe_json_serialize(extra_series)
         clean_markers = safe_json_serialize(markers)
         
         try:
-            st.session_state.chart_viz.render(clean_candles, series_data=clean_series, markers=clean_markers, key=f"chart_{timeframe}_{asset}")
-        except Exception as e:
-            st.error(f"Chart Render Error: {e}")
-
-        # Render chart
-        try:
-            st.session_state.chart_viz.render(candles, series_data=extra_series, markers=markers, key='main_chart_big')
+            st.session_state.chart_viz.render(clean_candles, series_data=clean_series, markers=clean_markers, key=f"chart_{timeframe}_{asset}_{period}")
         except Exception as e:
             st.error(f"⚠️ Chart Rendering Error: {e}")
-            st.session_state.chart_viz.render(candles, markers=markers, key='fallback_chart_big')
+            st.session_state.chart_viz.render(clean_candles, markers=clean_markers, key=f"fallback_{timeframe}_{asset}")
+        
+        end_prep = time.time()
+        print(f"[DIAGNOSTIC] Final UI Prep & Render took {end_prep - start_prep:.2f}s")
 
 
 else:
     st.warning("No data found for the selected asset/timeframe.")
+
+# Live Polling (Must be at the very end to avoid blocking initial render)
+if live_mode:
+    time.sleep(60)
+    st.rerun()
