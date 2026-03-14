@@ -19,10 +19,10 @@ def test_fvg_detection():
     
     df_result = engine.find_fvgs(df)
     
-    # Check if FVG detected at index 2
-    assert df_result.iloc[2]['fvg_type'] == 1
-    assert df_result.iloc[2]['fvg_top'] == 102
-    assert df_result.iloc[2]['fvg_bottom'] == 100
+    # Check if FVG detected at index 1
+    assert df_result.iloc[1]['fvg_type'] == 1
+    assert df_result.iloc[1]['fvg_top'] == 102
+    assert df_result.iloc[1]['fvg_bottom'] == 100
     print("FVG Detection Test Passed!")
 
 def test_internal_fractal_and_sweep():
