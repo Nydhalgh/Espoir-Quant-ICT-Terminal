@@ -306,23 +306,27 @@ if df is not None and not df.empty:
             }
         })
         
+        # Task: Add Level Label
+        tf_label = "Int" if level['tf'] in ['M1', 'M3', 'M5'] else "Ext"
+        label = f"[{level['tf']}] {tf_label} {level['type']}"
+        
+        markers.append({
+            "time": start_t,
+            "position": "aboveBar" if level['type'] == 'ITH' else "belowBar",
+            "color": color,
+            "shape": "arrowDown" if level['type'] == 'ITH' else "arrowUp",
+            "text": label
+        })
+        
         # Task: Add Sweep Marker
         if level['is_swept']:
             markers.append({
                 "time": end_t_val,
                 "position": "aboveBar" if level['type'] == 'ITH' else "belowBar",
-                "color": "#f1c40f", # Yellow for Sweep
+                "color": "#f1c40f",
                 "shape": "circle",
-                "text": "S"
+                "text": f"[{level['tf']}] SWEEP"
             })
-
-        # Collect Alerts: Current TF, Current Day, London-NY Window
-        if level.get('is_primary') and level['time'].date() == current_day:
-            hour = level['time'].hour
-            if 7 <= hour < 20:
-                ith_itl_alerts.append(level)
-                # Automatic Logging to Console
-                print(f"[ALERT] {level['type']} formed on {timeframe} at {level['price']:.2f} ({level['time'].strftime('%H:%M')})")
 
 
     # 3.2 Plot Global Entries on Current Chart (Session Only & Distilled)
