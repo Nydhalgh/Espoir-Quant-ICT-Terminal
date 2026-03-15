@@ -277,13 +277,6 @@ if df is not None and not df.empty:
     htf_levels = mtf_results['htf_levels']
 
 
-    # 3.1 Plot Levels (Surgical Mapping)
-    ith_itl_alerts = []
-    current_day = df.index[-1].date()
-    
-    # [LOGGING] Start of Level Plotting
-    print(f"[DEBUG] HTF Levels Count: {len(htf_levels)}")
-    
     for level in htf_levels:
         try:
             # SANITIZATION: Skip invalid entries
@@ -301,15 +294,15 @@ if df is not None and not df.empty:
             is_htf = level['tf'] != timeframe
             if is_htf: color = color.replace("0.9", "0.4")
             
-            # Line Geometry (Finite)
+            # Line Geometry (Range-Agnostic Plotting)
             extra_series.append({
                 "type": "Line",
                 "data": [{"time": start_t, "value": price_val}, {"time": end_t_val, "value": price_val}],
                 "options": {
                     "color": color,
-                    "lineWidth": 1 if is_htf else 2, 
-                    "lineStyle": 2 if is_htf else 0, 
-                    "title": f"{level['tf']} {level['type']}"
+                    "lineWidth": 2 if not is_htf else 1, 
+                    "lineStyle": 0 if not is_htf else 2, 
+                    "title": f"[{level['tf']}] {level['type']}"
                 }
             })
             
@@ -334,9 +327,24 @@ if df is not None and not df.empty:
                     "shape": "circle",
                     "text": f"[{level['tf']}] SWEEP"
                 })
+            # Collect Alerts: Current TF, Current Day, London-NY Window
+            if level.get('is_primary') and level['time'].date() == current_day:
+                hour = level['time'].hour
+                if 7 <= hour < 20:
+                    ith_itl_alerts.append(level)
+                    # Automatic Logging to Console
+                    print(f"[ALERT] {level['type']} formed on {timeframe} at {level['price']:.2f} ({level['time'].strftime('%H:%M')})")
+            # Collect Alerts: Current TF, Current Day, London-NY Window
+            if level.get('is_primary') and level['time'].date() == current_day:
+                hour = level['time'].hour
+                if 7 <= hour < 20:
+                    ith_itl_alerts.append(level)
+                    # Automatic Logging to Console
+                    print(f"[ALERT] {level['type']} formed on {timeframe} at {level['price']:.2f} ({level['time'].strftime('%H:%M')})")
         except Exception as e:
             print(f"[ERROR] Plotting failed for {level}: {e}")
             continue
+
 
 
     # [LOGGING] Signal Analysis Entry
