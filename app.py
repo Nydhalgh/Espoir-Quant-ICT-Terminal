@@ -278,55 +278,66 @@ if df is not None and not df.empty:
     global_entries = mtf_results['global_entries']
     htf_levels = mtf_results['htf_levels']
 
-    # 3.1 Plot Levels (HTF + Primary)
-    # Filter for alerts: Current day, Current TF, London Open to NY Close
+    # 3.1 Plot Levels (Surgical Mapping)
     ith_itl_alerts = []
     current_day = df.index[-1].date()
     
     for level in htf_levels:
         if pd.isna(level['price']): continue
         
-        is_p = level.get('is_primary', False)
+        # Color & Visibility mapping
+        color = "rgba(155, 89, 182, 0.9)" if level['type'] == 'ITH' else "rgba(52, 152, 219, 0.9)"
+        is_htf = level['tf'] != timeframe
+        if is_htf: color = color.replace("0.9", "0.4")
         
-        # Draw level line if within 7 days
-        if level['time'] > df.index[-1] - pd.Timedelta(days=7):
-            color = "rgba(155, 89, 182, 0.9)" if level['type'] == 'ITH' else "rgba(52, 152, 219, 0.9)"
-            if not is_p: # HTF levels are slightly more transparent
-                color = color.replace("0.9", "0.4")
-                
-            extra_series.append({
-                "type": "Line",
-                "data": [
-                    {"time": int(level['time'].timestamp()) + time_offset, "value": float(level['price'])},
-                    {"time": end_t, "value": float(level['price'])}
-                ],
-                "options": {
-                    "color": color,
-                    "lineWidth": 2 if is_p else 1, 
-                    "lineStyle": 0 if is_p else 2, 
-                    "title": f"{level['tf']} {level['type']}"
-                }
+        # Line Geometry (Finite)
+        start_t = int(level['time'].timestamp()) + time_offset
+        end_t_val = int(level['end_time'].timestamp()) + time_offset
+        
+        extra_series.append({
+            "type": "Line",
+            "data": [{"time": start_t, "value": float(level['price'])}, {"time": end_t_val, "value": float(level['price'])}],
+            "options": {
+                "color": color,
+                "lineWidth": 1 if is_htf else 2, 
+                "lineStyle": 2 if is_htf else 0, 
+                "title": f"{level['tf']} {level['type']}"
+            }
+        })
+        
+        # Task: Add Sweep Marker
+        if level['is_swept']:
+            markers.append({
+                "time": end_t_val,
+                "position": "aboveBar" if level['type'] == 'ITH' else "belowBar",
+                "color": "#f1c40f", # Yellow for Sweep
+                "shape": "circle",
+                "text": "S"
             })
-            
-        # Collect alerts for primary TF, current day, and London-NY window
-        if is_p and level['time'].date() == current_day:
-            hour = level['time'].hour
-            if 7 <= hour < 20: # London Open (7) to NY Close (20)
-                ith_itl_alerts.append(level)
 
-    # 3.2 Plot Global Entries on Current Chart (Session Only)
+        # Collect Alerts: Current TF, Current Day, London-NY Window
+        if level.get('is_primary') and level['time'].date() == current_day:
+            hour = level['time'].hour
+            if 7 <= hour < 20:
+                ith_itl_alerts.append(level)
+                # Automatic Logging to Console
+                print(f"[ALERT] {level['type']} formed on {timeframe} at {level['price']:.2f} ({level['time'].strftime('%H:%M')})")
+
+
+    # 3.2 Plot Global Entries on Current Chart (Session Only & Distilled)
+    plotted_times = set()
     for entry in global_entries:
         if entry['time'] >= df.index[0] and entry['time'] <= df.index[-1]:
-            # Session Filter: London Open (7) to NY Close (20)
             hour = entry['time'].hour
-            is_in_session = 7 <= hour < 20
-            
-            if is_in_session:
+            if 7 <= hour < 20:
                 try:
-                    # Find the corresponding candle on the CURRENT timeframe (M1, M5, M15, etc)
-                    # method='pad' ensures we pick the HTF candle that contains this M1 signal
                     idx_pos = df.index.get_indexer([entry['time']], method='pad')[0]
                     if idx_pos == -1: continue
+                    
+                    # DISTILLATION: Only plot one signal per direction per candle
+                    sig_key = (df.index[idx_pos], entry['type'])
+                    if sig_key in plotted_times: continue
+                    plotted_times.add(sig_key)
                     
                     all_signals.append({
                         'entry_index': idx_pos,
@@ -335,18 +346,16 @@ if df is not None and not df.empty:
                         'asset': asset
                     })
                     
-                    # Align marker time to the actual chart timestamp
                     aligned_time = int(df.index[idx_pos].timestamp()) + time_offset
-                    
                     markers.append({
                         "time": aligned_time,
                         "position": "belowBar" if entry['type'] == 'LONG' else "aboveBar",
                         "color": "#2ecc71" if entry['type'] == 'LONG' else "#e74c3c",
                         "shape": "arrowUp" if entry['type'] == 'LONG' else "arrowDown",
-                        "text": f"{entry['type']} ENTRY",
-                        "size": 2 # Make arrows larger
+                        "text": entry['type'] # Simplified label
                     })
                 except: pass
+
 
     # 3.3 FVG Rendering (Selected TF Only)
     active_fvgs = df_with_fvgs[df_with_fvgs['fvg_type'].isin([1, -1])].tail(5)
