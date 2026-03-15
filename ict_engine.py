@@ -97,38 +97,23 @@ class ICTEngine:
 
     def _is_in_killzone(self, time):
         hour = time.hour
+        # ITL Standard: London 07-12, NY 13-17
         return (7 <= hour < 12) or (13 <= hour < 17)
 
-    def _validate_entry(self, i_time, i_row, sweeps_df, consumed_sweeps, exec_df):
-        if not self._is_in_killzone(i_time):
-            return False, None, None
-            
-        lookback = i_time - pd.Timedelta(minutes=90)
-        recent = sweeps_df[(sweeps_df['time'] < i_time) & (sweeps_df['time'] >= lookback)]
+    def _get_ifvg_count_in_leg(self, sweep, exec_df):
+        # Counts iFVGs in the manipulation leg
+        ifvg = self.find_ifvgs(exec_df)
+        mask = (ifvg.index >= sweep['time']) & \
+               (ifvg.index <= sweep['time'] + pd.Timedelta(minutes=90)) & \
+               (ifvg['type'] != 0)
         
-        if recent.empty:
-            return False, None, None
-            
-        signal_type = 'LONG' if i_row['type'] == 1 else 'SHORT'
-        sweep_type = 'long' if signal_type == 'LONG' else 'short'
-        
-        potential_sweeps = recent[recent['type'] == sweep_type]
-        
-        # Bounding check: iFVG must be within HTF sweep manipulation leg
-        # Leg is defined by the high/low of the sweep candle
-        bound_sweeps = potential_sweeps[
-            (potential_sweeps['low'] <= exec_df.loc[i_time, 'Close']) &
-            (potential_sweeps['high'] >= exec_df.loc[i_time, 'Close'])
+        # Further filter iFVGs that fall within the price bounds of the sweep candle
+        relevant_ifvgs = ifvg[mask]
+        in_bounds = relevant_ifvgs[
+            (relevant_ifvgs['btm'] <= sweep['high']) & 
+            (relevant_ifvgs['top'] >= sweep['low'])
         ]
-        
-        unconsumed = [s for s in bound_sweeps['time'] if s not in consumed_sweeps]
-        
-        if unconsumed:
-            sweep_to_consume = unconsumed[-1]
-            marker = {'time': i_time, 'price': exec_df.loc[i_time, 'Close'], 'type': signal_type}
-            return True, marker, sweep_to_consume
-            
-        return False, None, None
+        return len(in_bounds)
 
     def compute_mtf_signals(self, primary_df, htf_dfs, timeframe):
         htf_levels_list = []
@@ -136,11 +121,7 @@ class ICTEngine:
         now = primary_df.index[-1]
         cutoff = now - pd.Timedelta(days=30)
         
-        exec_df = htf_dfs.get('M1', primary_df if timeframe == 'M1' else pd.DataFrame())
-        if exec_df.empty: exec_df = primary_df 
-        current_price = exec_df['Close'].iloc[-1]
-
-        # 1. Identify all Structural Levels (H1, M30, M15)
+        # 1. Gather HTF Sweeps
         for tf, hdf in htf_dfs.items():
             if hdf.empty or tf == 'M1': continue
             fvg_data = self.find_fvgs(hdf)
@@ -149,42 +130,38 @@ class ICTEngine:
             for t, row in ith_data.dropna(subset=['Level']).iterrows():
                 if t < cutoff: continue
                 val, price, sweep_idx = row['Type'], row['Level'], row['SweptIndex']
-                is_swept = not pd.isna(sweep_idx)
-                end_time = hdf.index[int(sweep_idx)] if is_swept else now
-                if (is_swept and (now - end_time) < pd.Timedelta(hours=24)) or (not is_swept and abs(price - current_price)/current_price < 0.015):
-                    htf_levels_list.append({'time': t, 'end_time': end_time, 'price': price, 'type': 'ITH' if val == 1 else 'ITL', 'tf': tf, 'is_swept': is_swept})
-                if is_swept:
+                if not pd.isna(sweep_idx):
+                    end_time = hdf.index[int(sweep_idx)]
+                    htf_levels_list.append({'time': t, 'end_time': end_time, 'price': price, 'type': 'ITH' if val == 1 else 'ITL', 'tf': tf, 'is_swept': True})
                     htf_sweeps.append({'time': end_time, 'type': 'short' if val == 1 else 'long', 'high': hdf.loc[end_time, 'High'], 'low': hdf.loc[end_time, 'Low']})
 
-        # 2. Local Levels (Primary TF)
-        p_fvg = self.find_fvgs(primary_df)
-        p_shl = self.swing_highs_lows(primary_df, swing_length=5)
-        p_ith_data = self.ith_itl(primary_df, p_shl, p_fvg)
-        for t, row in p_ith_data.dropna(subset=['Level']).iterrows():
-            if t < cutoff: continue
-            val, price, sweep_idx = row['Type'], row['Level'], row['SweptIndex']
-            is_swept = not pd.isna(sweep_idx)
-            end_time = primary_df.index[int(sweep_idx)] if is_swept else now
-            if (is_swept and (now - end_time) < pd.Timedelta(hours=24)) or (not is_swept and abs(price - current_price)/current_price < 0.015):
-                if not any(l['price'] == price for l in htf_levels_list):
-                    htf_levels_list.append({'time': t, 'end_time': end_time, 'price': price, 'type': 'ITH' if val == 1 else 'ITL', 'tf': timeframe, 'is_primary': True, 'is_swept': is_swept})
-
-        # 3. M1/M5 Entry Confirmation (Pipeline-based validation)
+        # 2. Pipeline Cascade: M1 -> M3 -> M5
         global_entries = []
-        if not exec_df.empty and htf_sweeps:
-            exec_ifvgs = self.find_ifvgs(exec_df)
-            active_ifvgs = exec_ifvgs[exec_ifvgs['type'] != 0]
-            sweeps_df = pd.DataFrame(htf_sweeps).sort_values('time').drop_duplicates('time')
+        sweeps_df = pd.DataFrame(htf_sweeps)
+        if not sweeps_df.empty:
+            sweeps_df = sweeps_df.sort_values('time').drop_duplicates('time')
             consumed_sweeps = set()
-            for i_time, i_row in active_ifvgs.iterrows():
-                is_valid, marker, sweep_time = self._validate_entry(i_time, i_row, sweeps_df, consumed_sweeps, exec_df)
-                if is_valid:
-                    global_entries.append(marker)
-                    consumed_sweeps.add(sweep_time)
-        
+            timeframe_cascade = ['M1', 'M3', 'M5']
+            for tf in timeframe_cascade:
+                exec_df = htf_dfs.get(tf, primary_df)
+                if len(exec_df) == 0: continue
+                ts = pd.Timestamp(exec_df.index[-1])
+                if not self._is_in_killzone(ts): continue
+                
+                # Validation logic
+                for _, sweep in sweeps_df.iterrows():
+                    if sweep['time'] in consumed_sweeps: continue
+                    if self._get_ifvg_count_in_leg(sweep, exec_df) == 1:
+                        # Force type to string for .upper()
+                        global_entries.append({'time': sweep['time'], 'price': exec_df.loc[sweep['time'], 'Close'], 'type': str(sweep['type']).upper()})
+                        consumed_sweeps.add(sweep['time'])
+                        
         if timeframe in ['M1', 'M5']:
             htf_levels_list = sorted(htf_levels_list, key=lambda x: x['time'], reverse=True)[:3]
+                        
         return {'global_entries': global_entries, 'htf_levels': htf_levels_list}
+
+
 
 
     def swing_highs_lows(self, ohlc, swing_length=5):
