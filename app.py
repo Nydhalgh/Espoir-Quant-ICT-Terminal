@@ -275,8 +275,9 @@ if df is not None and not df.empty:
 
     # Use optimized and cached signal engine
     mtf_results = compute_cached_signals(asset, timeframe, df, htf_dfs)
-    global_entries = mtf_results['global_entries']
+    global_entries = mtf_results['entries_by_tf'].get(timeframe, [])
     htf_levels = mtf_results['htf_levels']
+
 
     # 3.1 Plot Levels (Surgical Mapping)
     ith_itl_alerts = []

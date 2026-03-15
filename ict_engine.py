@@ -135,16 +135,19 @@ class ICTEngine:
                     htf_levels_list.append({'time': t, 'end_time': end_time, 'price': price, 'type': 'ITH' if val == 1 else 'ITL', 'tf': tf, 'is_swept': True})
                     htf_sweeps.append({'time': end_time, 'type': 'short' if val == 1 else 'long', 'high': hdf.loc[end_time, 'High'], 'low': hdf.loc[end_time, 'Low']})
 
-        # 2. Pipeline Cascade: M1 -> M3 -> M5
-        global_entries = []
+        # 2. Pipeline Cascade: M1 -> M3 -> M5 -> H1
+        # Store entries by timeframe
+        entries_by_tf = {tf: [] for tf in ['M1', 'M3', 'M5', 'H1']}
         sweeps_df = pd.DataFrame(htf_sweeps)
         if not sweeps_df.empty:
             sweeps_df = sweeps_df.sort_values('time').drop_duplicates('time')
             consumed_sweeps = set()
-            timeframe_cascade = ['M1', 'M3', 'M5']
+            timeframe_cascade = ['M1', 'M3', 'M5', 'H1']
             for tf in timeframe_cascade:
                 exec_df = htf_dfs.get(tf, primary_df)
                 if len(exec_df) == 0: continue
+                
+                # Check killzone if applicable
                 ts = pd.Timestamp(exec_df.index[-1])
                 if not self._is_in_killzone(ts): continue
                 
@@ -152,14 +155,14 @@ class ICTEngine:
                 for _, sweep in sweeps_df.iterrows():
                     if sweep['time'] in consumed_sweeps: continue
                     if self._get_ifvg_count_in_leg(sweep, exec_df) == 1:
-                        # Force type to string for .upper()
-                        global_entries.append({'time': sweep['time'], 'price': exec_df.loc[sweep['time'], 'Close'], 'type': str(sweep['type']).upper()})
+                        entry = {'time': sweep['time'], 'price': exec_df.loc[sweep['time'], 'Close'], 'type': str(sweep['type']).upper()}
+                        entries_by_tf[tf].append(entry)
                         consumed_sweeps.add(sweep['time'])
                         
         if timeframe in ['M1', 'M5']:
             htf_levels_list = sorted(htf_levels_list, key=lambda x: x['time'], reverse=True)[:3]
                         
-        return {'global_entries': global_entries, 'htf_levels': htf_levels_list}
+        return {'entries_by_tf': entries_by_tf, 'htf_levels': htf_levels_list}
 
 
 
