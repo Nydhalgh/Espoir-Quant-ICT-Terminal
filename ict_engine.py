@@ -244,3 +244,5 @@ class ICTEngine:
             })
             
         return {'markers': markers[-50:], 'extra_series': extra_series}
+
+    def get_current_status(self, df): return "Terminal Active | Monitoring Session Levels"
