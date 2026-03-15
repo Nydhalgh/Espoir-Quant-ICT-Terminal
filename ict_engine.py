@@ -144,7 +144,12 @@ class ICTEngine:
                     })
                     
                 if is_swept:
-                    htf_sweeps.append({'time': end_time, 'type': 'short' if val == 1 else 'long'})
+                    htf_sweeps.append({
+                        'time': end_time, 
+                        'type': 'short' if val == 1 else 'long',
+                        'high': hdf.loc[end_time, 'High'],
+                        'low': hdf.loc[end_time, 'Low']
+                    })
 
         # 2. Local Levels (Primary TF) filtering applies here too
         p_fvg = self.find_fvgs(primary_df)
@@ -183,20 +188,26 @@ class ICTEngine:
             consumed_sweeps = set()
             
             for i_time, i_row in active_ifvgs.iterrows():
-                hour = i_time.hour
+                # Ensure i_time is a Timestamp
+                ts = pd.Timestamp(i_time)
+                hour = ts.hour
                 
                 is_london = 7 <= hour < 12
                 is_ny = 13 <= hour < 17
                 if not (is_london or is_ny):
                     continue
                     
-                lookback = i_time - pd.Timedelta(minutes=90)
-                recent_sweeps = sweeps_df[(sweeps_df['time'] < i_time) & (sweeps_df['time'] >= lookback)]
+                lookback = ts - pd.Timedelta(minutes=90)
+                recent_sweeps = sweeps_df[(sweeps_df['time'] < ts) & (sweeps_df['time'] >= lookback)]
                 
                 if recent_sweeps.empty: continue
                 
                 if i_row['type'] == 1:
-                    long_sweeps = recent_sweeps[recent_sweeps['type'] == 'long']
+                    long_sweeps = recent_sweeps[
+                        (recent_sweeps['type'] == 'long') &
+                        (recent_sweeps['low'] <= exec_df.loc[i_time, 'Close']) &
+                        (recent_sweeps['high'] >= exec_df.loc[i_time, 'Close'])
+                    ]
                     unconsumed = [s for s in long_sweeps['time'] if s not in consumed_sweeps]
                     
                     if unconsumed:
@@ -206,7 +217,11 @@ class ICTEngine:
                         consumed_sweeps.add(unconsumed[-1])
                 
                 elif i_row['type'] == -1:
-                    short_sweeps = recent_sweeps[recent_sweeps['type'] == 'short']
+                    short_sweeps = recent_sweeps[
+                        (recent_sweeps['type'] == 'short') &
+                        (recent_sweeps['low'] <= exec_df.loc[i_time, 'Close']) &
+                        (recent_sweeps['high'] >= exec_df.loc[i_time, 'Close'])
+                    ]
                     unconsumed = [s for s in short_sweeps['time'] if s not in consumed_sweeps]
                     
                     if unconsumed:
