@@ -159,6 +159,7 @@ class ICTEngine:
                         entries_by_tf[tf].append(entry)
                         consumed_sweeps.add(sweep['time'])
                         
+        # FIX: Ensure htf_levels_list are populated regardless of signals
         if timeframe in ['M1', 'M5']:
             htf_levels_list = sorted(htf_levels_list, key=lambda x: x['time'], reverse=True)[:3]
                         
@@ -187,4 +188,59 @@ class ICTEngine:
             for st, en in zip(starts, ends): res.append({"start": df.index[st], "end": df.index[en], "color": c, "name": name})
         return res
 
-    def get_current_status(self, df): return "Terminal Active | Monitoring Session Levels"
+    def prepare_plot_data(self, df, timeframe, htf_levels, global_entries):
+        """
+        Orchestrator: Pre-computes all structural levels, signals, and markers.
+        This follows the 'Compute-First' ITT-Analytics architecture.
+        """
+        markers = []
+        extra_series = []
+        time_offset = 3600 # UTC+1
+
+        # 1. Plot Structural Levels
+        for level in htf_levels:
+            if pd.isna(level['price']): continue
+            price_val = float(level['price'])
+            start_t = int(level['time'].timestamp()) + time_offset
+            end_t_val = int(level['end_time'].timestamp()) + time_offset
+            color = "rgba(155, 89, 182, 0.9)" if level['type'] == 'ITH' else "rgba(52, 152, 219, 0.9)"
+            is_htf = level['tf'] != timeframe
+            if is_htf: color = color.replace("0.9", "0.4")
+            
+            extra_series.append({
+                "type": "Line",
+                "data": [{"time": start_t, "value": price_val}, {"time": end_t_val, "value": price_val}],
+                "options": {"color": color, "lineWidth": 2 if not is_htf else 1, "lineStyle": 0 if not is_htf else 2, "title": f"[{level['tf']}] {level['type']}"}
+            })
+            
+            tf_label = "Int" if level['tf'] in ['M1', 'M3', 'M5'] else "Ext"
+            label = f"[{level['tf']}] {tf_label} {level['type']}"
+            markers.append({
+                "time": start_t,
+                "position": "aboveBar" if level['type'] == 'ITH' else "belowBar",
+                "color": color,
+                "shape": "arrowDown" if level['type'] == 'ITH' else "arrowUp",
+                "text": label
+            })
+            
+            if level.get('is_swept'):
+                markers.append({
+                    "time": end_t_val,
+                    "position": "aboveBar" if level['type'] == 'ITH' else "belowBar",
+                    "color": "#f1c40f",
+                    "shape": "circle",
+                    "text": f"[{level['tf']}] SWEEP"
+                })
+
+        # 2. Plot Global Entries
+        for entry in global_entries:
+            aligned_time = int(entry['time'].timestamp()) + time_offset
+            markers.append({
+                "time": aligned_time,
+                "position": "belowBar" if entry['type'] == 'LONG' else "aboveBar",
+                "color": "#2ecc71" if entry['type'] == 'LONG' else "#e74c3c",
+                "shape": "arrowUp" if entry['type'] == 'LONG' else "arrowDown",
+                "text": entry['type']
+            })
+            
+        return {'markers': markers[-50:], 'extra_series': extra_series}
