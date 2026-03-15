@@ -177,31 +177,22 @@ def load_data(asset, timeframe, period):
     
     # Fetch HTF data + ALWAYS fetch M1 for execution signals
     htf_data = {}
-    target_tfs = ["M1"] # Always include M1
-    
-    if timeframe == "M1":
-        target_tfs = ["M5", "M15", "M30", "H1"]
-    elif timeframe == "M5":
-        target_tfs = ["M1", "M15", "M30", "H1"]
-    elif timeframe == "M15":
-        target_tfs = ["M1", "M30", "H1"]
-    elif timeframe in ["M30", "H1"]:
-        target_tfs = ["M1", "H1" if timeframe == "M30" else "M30"]
+    target_tfs = ["M1", "M5", "M15", "M30", "H1"] # Fetch everything to be safe
     
     # Remove current timeframe from background targets
     target_tfs = [t for t in target_tfs if t != timeframe]
     
     if target_tfs:
-        print(f"[DIAGNOSTIC] Fetching background data in parallel: {target_tfs}")
         with ThreadPoolExecutor(max_workers=len(target_tfs)) as executor:
             future_to_tf = {executor.submit(st.session_state.data_manager.fetch_data, asset, tf, period): tf for tf in target_tfs}
             for future in future_to_tf:
                 tf = future_to_tf[future]
                 try:
-                    htf_data[tf] = future.result(timeout=30)
+                    res = future.result(timeout=30)
+                    if not res.empty: htf_data[tf] = res
                 except Exception as e:
-                    print(f"[DIAGNOSTIC] Timeout or Error fetching {tf}: {e}")
-                    htf_data[tf] = pd.DataFrame()
+                    print(f"[DIAGNOSTIC] Error fetching {tf}: {e}")
+
     
     end_time = time.time()
     msg = f"Data Loading took {end_time - start_time:.2f}s for {asset} {timeframe}"
