@@ -33,6 +33,8 @@ class ChartVisualizer:
         }
 
     def prepare_candles(self, df, time_offset=0):
+        # Normalize columns to Title Case to match expected keys
+        df = df.rename(columns={c: c.capitalize() for c in df.columns})
         candles = []
         for index, row in df.iterrows():
             candles.append({
@@ -43,6 +45,7 @@ class ChartVisualizer:
                 "close": float(row['Close']),
             })
         return candles
+
 
     def create_fvg_rectangles(self, fvgs):
         rects = []
