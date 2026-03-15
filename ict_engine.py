@@ -105,7 +105,8 @@ class ICTEngine:
         htf_levels_list = []
         htf_sweeps = []
         now = primary_df.index[-1]
-        cutoff = now - pd.Timedelta(days=3)
+        # INCREASED CUTOFF TO 30 DAYS FOR FULL HISTORY
+        cutoff = now - pd.Timedelta(days=30)
         
         exec_df = htf_dfs.get('M1', primary_df if timeframe == 'M1' else pd.DataFrame())
         if exec_df.empty:
