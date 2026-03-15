@@ -347,42 +347,13 @@ if df is not None and not df.empty:
 
 
 
-    # [LOGGING] Signal Analysis Entry
-    print(f"[DEBUG] Processing {len(global_entries)} total entries for {timeframe}")
+    # Plotting Markers (Throttled for Performance)
+    # Sort by time descending and take only the most recent 50 markers
+    markers.sort(key=lambda x: x['time'], reverse=True)
+    markers = markers[:50]
     
-    # 3.2 Plot Global Entries on Current Chart (Session Only & Distilled)
-    plotted_times = set()
-    for entry in global_entries:
-        # [LOGGING] Entry Details
-        print(f"[DEBUG] Processing entry: {entry}")
-        if entry['time'] >= df.index[0] and entry['time'] <= df.index[-1]:
-            hour = entry['time'].hour
-            if 7 <= hour < 20:
-                try:
-                    idx_pos = df.index.get_indexer([entry['time']], method='pad')[0]
-                    if idx_pos == -1: continue
-                    
-                    # DISTILLATION: Only plot one signal per direction per candle
-                    sig_key = (df.index[idx_pos], entry['type'])
-                    if sig_key in plotted_times: continue
-                    plotted_times.add(sig_key)
-                    
-                    all_signals.append({
-                        'entry_index': idx_pos,
-                        'sl_price': df.iloc[idx_pos]['Low'] if entry['type'] == 'LONG' else df.iloc[idx_pos]['High'],
-                        'fvg_type': -1 if entry['type'] == 'LONG' else 1,
-                        'asset': asset
-                    })
-                    
-                    aligned_time = int(df.index[idx_pos].timestamp()) + time_offset
-                    markers.append({
-                        "time": aligned_time,
-                        "position": "belowBar" if entry['type'] == 'LONG' else "aboveBar",
-                        "color": "#2ecc71" if entry['type'] == 'LONG' else "#e74c3c",
-                        "shape": "arrowUp" if entry['type'] == 'LONG' else "arrowDown",
-                        "text": entry['type'] # Simplified label
-                    })
-                except: pass
+    # [LOGGING]
+    print(f"[DEBUG] Plotting {len(markers)} markers after throttling")
 
 
     # 3.3 FVG Rendering (Selected TF Only)
