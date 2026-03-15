@@ -123,7 +123,7 @@ class ICTEngine:
         
         # 1. Gather HTF Sweeps
         for tf, hdf in htf_dfs.items():
-            if hdf.empty or tf == 'M1': continue
+            if hdf.empty: continue
             fvg_data = self.find_fvgs(hdf)
             shl_data = self.swing_highs_lows(hdf, swing_length=5)
             ith_data = self.ith_itl(hdf, shl_data, fvg_data)
