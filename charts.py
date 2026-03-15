@@ -81,8 +81,9 @@ class ChartVisualizer:
                 "wickUpColor": "#26a69a",
                 "wickDownColor": "#ef5350",
             },
-            "markers": markers
+            "markers": markers # Marker visibility is handled by renderer, but markers are now persistent
         })
+
 
         # Single chart config - Height at 900 for professional feel
         chart_config = {

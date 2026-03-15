@@ -177,31 +177,22 @@ def load_data(asset, timeframe, period):
     
     # Fetch HTF data + ALWAYS fetch M1 for execution signals
     htf_data = {}
-    target_tfs = ["M1"] # Always include M1
-    
-    if timeframe == "M1":
-        target_tfs = ["M5", "M15", "M30", "H1"]
-    elif timeframe == "M5":
-        target_tfs = ["M1", "M15", "M30", "H1"]
-    elif timeframe == "M15":
-        target_tfs = ["M1", "M30", "H1"]
-    elif timeframe in ["M30", "H1"]:
-        target_tfs = ["M1", "H1" if timeframe == "M30" else "M30"]
+    target_tfs = ["M1", "M5", "M15", "M30", "H1"] # Fetch everything to be safe
     
     # Remove current timeframe from background targets
     target_tfs = [t for t in target_tfs if t != timeframe]
     
     if target_tfs:
-        print(f"[DIAGNOSTIC] Fetching background data in parallel: {target_tfs}")
         with ThreadPoolExecutor(max_workers=len(target_tfs)) as executor:
             future_to_tf = {executor.submit(st.session_state.data_manager.fetch_data, asset, tf, period): tf for tf in target_tfs}
             for future in future_to_tf:
                 tf = future_to_tf[future]
                 try:
-                    htf_data[tf] = future.result(timeout=30)
+                    res = future.result(timeout=30)
+                    if not res.empty: htf_data[tf] = res
                 except Exception as e:
-                    print(f"[DIAGNOSTIC] Timeout or Error fetching {tf}: {e}")
-                    htf_data[tf] = pd.DataFrame()
+                    print(f"[DIAGNOSTIC] Error fetching {tf}: {e}")
+
     
     end_time = time.time()
     msg = f"Data Loading took {end_time - start_time:.2f}s for {asset} {timeframe}"
@@ -275,15 +266,22 @@ if df is not None and not df.empty:
 
     # Use optimized and cached signal engine
     mtf_results = compute_cached_signals(asset, timeframe, df, htf_dfs)
-    global_entries = mtf_results['global_entries']
+    global_entries = mtf_results['entries_by_tf'].get(timeframe, [])
     htf_levels = mtf_results['htf_levels']
+
 
     # 3.1 Plot Levels (Surgical Mapping)
     ith_itl_alerts = []
     current_day = df.index[-1].date()
     
+    # [LOGGING] Start of Level Plotting
+    print(f"[DEBUG] HTF Levels Count: {len(htf_levels)}")
+    
     for level in htf_levels:
         if pd.isna(level['price']): continue
+        
+        # [LOGGING] Detail
+        print(f"[DEBUG] Plotting {level['tf']} {level['type']} at {level['price']}")
         
         # Color & Visibility mapping
         color = "rgba(155, 89, 182, 0.9)" if level['type'] == 'ITH' else "rgba(52, 152, 219, 0.9)"
@@ -305,28 +303,37 @@ if df is not None and not df.empty:
             }
         })
         
+        # Task: Add Level Label
+        tf_label = "Int" if level['tf'] in ['M1', 'M3', 'M5'] else "Ext"
+        label = f"[{level['tf']}] {tf_label} {level['type']}"
+        
+        markers.append({
+            "time": start_t,
+            "position": "aboveBar" if level['type'] == 'ITH' else "belowBar",
+            "color": color,
+            "shape": "arrowDown" if level['type'] == 'ITH' else "arrowUp",
+            "text": label
+        })
+        
         # Task: Add Sweep Marker
         if level['is_swept']:
             markers.append({
                 "time": end_t_val,
                 "position": "aboveBar" if level['type'] == 'ITH' else "belowBar",
-                "color": "#f1c40f", # Yellow for Sweep
+                "color": "#f1c40f",
                 "shape": "circle",
-                "text": "S"
+                "text": f"[{level['tf']}] SWEEP"
             })
 
-        # Collect Alerts: Current TF, Current Day, London-NY Window
-        if level.get('is_primary') and level['time'].date() == current_day:
-            hour = level['time'].hour
-            if 7 <= hour < 20:
-                ith_itl_alerts.append(level)
-                # Automatic Logging to Console
-                print(f"[ALERT] {level['type']} formed on {timeframe} at {level['price']:.2f} ({level['time'].strftime('%H:%M')})")
 
-
+    # [LOGGING] Signal Analysis Entry
+    print(f"[DEBUG] Processing {len(global_entries)} total entries for {timeframe}")
+    
     # 3.2 Plot Global Entries on Current Chart (Session Only & Distilled)
     plotted_times = set()
     for entry in global_entries:
+        # [LOGGING] Entry Details
+        print(f"[DEBUG] Processing entry: {entry}")
         if entry['time'] >= df.index[0] and entry['time'] <= df.index[-1]:
             hour = entry['time'].hour
             if 7 <= hour < 20:
