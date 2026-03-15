@@ -285,52 +285,58 @@ if df is not None and not df.empty:
     print(f"[DEBUG] HTF Levels Count: {len(htf_levels)}")
     
     for level in htf_levels:
-        if pd.isna(level['price']): continue
-        
-        # [LOGGING] Detail
-        print(f"[DEBUG] Plotting {level['tf']} {level['type']} at {level['price']}")
-        
-        # Color & Visibility mapping
-        color = "rgba(155, 89, 182, 0.9)" if level['type'] == 'ITH' else "rgba(52, 152, 219, 0.9)"
-        is_htf = level['tf'] != timeframe
-        if is_htf: color = color.replace("0.9", "0.4")
-        
-        # Line Geometry (Finite)
-        start_t = int(level['time'].timestamp()) + time_offset
-        end_t_val = int(level['end_time'].timestamp()) + time_offset
-        
-        extra_series.append({
-            "type": "Line",
-            "data": [{"time": start_t, "value": float(level['price'])}, {"time": end_t_val, "value": float(level['price'])}],
-            "options": {
-                "color": color,
-                "lineWidth": 1 if is_htf else 2, 
-                "lineStyle": 2 if is_htf else 0, 
-                "title": f"{level['tf']} {level['type']}"
-            }
-        })
-        
-        # Task: Add Level Label
-        tf_label = "Int" if level['tf'] in ['M1', 'M3', 'M5'] else "Ext"
-        label = f"[{level['tf']}] {tf_label} {level['type']}"
-        
-        markers.append({
-            "time": start_t,
-            "position": "aboveBar" if level['type'] == 'ITH' else "belowBar",
-            "color": color,
-            "shape": "arrowDown" if level['type'] == 'ITH' else "arrowUp",
-            "text": label
-        })
-        
-        # Task: Add Sweep Marker
-        if level['is_swept']:
-            markers.append({
-                "time": end_t_val,
-                "position": "aboveBar" if level['type'] == 'ITH' else "belowBar",
-                "color": "#f1c40f",
-                "shape": "circle",
-                "text": f"[{level['tf']}] SWEEP"
+        try:
+            # SANITIZATION: Skip invalid entries
+            if pd.isna(level['price']) or pd.isna(level['time']): continue
+            
+            price_val = float(level['price'])
+            start_t = int(level['time'].timestamp()) + time_offset
+            end_t_val = int(level['end_time'].timestamp()) + time_offset
+            
+            # [LOGGING] Detail
+            print(f"[DEBUG] Plotting {level['tf']} {level['type']} at {price_val}")
+            
+            # Color & Visibility mapping
+            color = "rgba(155, 89, 182, 0.9)" if level['type'] == 'ITH' else "rgba(52, 152, 219, 0.9)"
+            is_htf = level['tf'] != timeframe
+            if is_htf: color = color.replace("0.9", "0.4")
+            
+            # Line Geometry (Finite)
+            extra_series.append({
+                "type": "Line",
+                "data": [{"time": start_t, "value": price_val}, {"time": end_t_val, "value": price_val}],
+                "options": {
+                    "color": color,
+                    "lineWidth": 1 if is_htf else 2, 
+                    "lineStyle": 2 if is_htf else 0, 
+                    "title": f"{level['tf']} {level['type']}"
+                }
             })
+            
+            # Task: Add Level Label
+            tf_label = "Int" if level['tf'] in ['M1', 'M3', 'M5'] else "Ext"
+            label = f"[{level['tf']}] {tf_label} {level['type']}"
+            
+            markers.append({
+                "time": start_t,
+                "position": "aboveBar" if level['type'] == 'ITH' else "belowBar",
+                "color": color,
+                "shape": "arrowDown" if level['type'] == 'ITH' else "arrowUp",
+                "text": label
+            })
+            
+            # Task: Add Sweep Marker
+            if level['is_swept']:
+                markers.append({
+                    "time": end_t_val,
+                    "position": "aboveBar" if level['type'] == 'ITH' else "belowBar",
+                    "color": "#f1c40f",
+                    "shape": "circle",
+                    "text": f"[{level['tf']}] SWEEP"
+                })
+        except Exception as e:
+            print(f"[ERROR] Plotting failed for {level}: {e}")
+            continue
 
 
     # [LOGGING] Signal Analysis Entry
