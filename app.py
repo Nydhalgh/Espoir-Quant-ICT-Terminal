@@ -175,6 +175,13 @@ def load_data(asset, timeframe, period):
     print(f"[DIAGNOSTIC] Fetching primary data: {asset} {timeframe} ({period})")
     df = st.session_state.data_manager.fetch_data(asset, timeframe, period)
     
+    # [DIAGNOSTIC] Check data return
+    if df.empty:
+        print(f"[ERROR] DataManager returned EMPTY for {asset} {timeframe}")
+    else:
+        print(f"[DEBUG] DataManager returned {len(df)} candles for {asset} {timeframe}")
+
+    
     # Fetch HTF data + ALWAYS fetch M1 for execution signals
     htf_data = {}
     target_tfs = ["M1", "M5", "M15", "M30", "H1"] # Fetch everything to be safe
