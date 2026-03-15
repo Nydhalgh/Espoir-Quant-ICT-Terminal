@@ -327,23 +327,10 @@ if df is not None and not df.empty:
                     "shape": "circle",
                     "text": f"[{level['tf']}] SWEEP"
                 })
-            # Collect Alerts: Current TF, Current Day, London-NY Window
-            if level.get('is_primary') and level['time'].date() == current_day:
-                hour = level['time'].hour
-                if 7 <= hour < 20:
-                    ith_itl_alerts.append(level)
-                    # Automatic Logging to Console
-                    print(f"[ALERT] {level['type']} formed on {timeframe} at {level['price']:.2f} ({level['time'].strftime('%H:%M')})")
-            # Collect Alerts: Current TF, Current Day, London-NY Window
-            if level.get('is_primary') and level['time'].date() == current_day:
-                hour = level['time'].hour
-                if 7 <= hour < 20:
-                    ith_itl_alerts.append(level)
-                    # Automatic Logging to Console
-                    print(f"[ALERT] {level['type']} formed on {timeframe} at {level['price']:.2f} ({level['time'].strftime('%H:%M')})")
         except Exception as e:
             print(f"[ERROR] Plotting failed for {level}: {e}")
             continue
+
 
 
 
@@ -356,7 +343,11 @@ if df is not None and not df.empty:
     print(f"[DEBUG] Plotting {len(markers)} markers after throttling")
 
 
+    # Ensure index is sorted for charting
+    df = df.sort_index()
+    
     # 3.3 FVG Rendering (Selected TF Only)
+
     active_fvgs = df_with_fvgs[df_with_fvgs['fvg_type'].isin([1, -1])].tail(5)
     for idx, row in active_fvgs.iterrows():
         # Safety check: skip if levels are NaN
@@ -433,7 +424,13 @@ if df is not None and not df.empty:
     # 5. Render Chart Layout
     st.markdown("---")
     
+    # [DIAGNOSTIC] Final check before rendering
+    if df.empty:
+        st.error("No candle data available for this timeframe!")
+        st.stop()
+        
     if "TradingView" in chart_type:
+
         st.subheader(f"💹 Live {asset} Analysis Feed")
         
         # Dual-column layout: TradingView on left, Quantitative Signals on right
@@ -471,22 +468,11 @@ if df is not None and not df.empty:
         with signal_col:
             st.markdown("### 🔔 ITH/ITL Alerts")
             st.caption(f"Current TF: {timeframe} | Session Only")
-            
-            if ith_itl_alerts:
-                for alt in ith_itl_alerts[-5:][::-1]: # Show last 5
-                    with st.container():
-                        st.markdown(f"""
-                        <div style="background-color: #1e222d; padding: 12px; border-radius: 8px; margin-bottom: 8px; border-left: 4px solid {'#9b59b6' if alt['type'] == 'ITH' else '#3498db'}">
-                            <p style="margin: 0; font-size: 0.85em; color: {'#9b59b6' if alt['type'] == 'ITH' else '#3498db'}; font-weight: bold;">{alt['type']} DETECTED</p>
-                            <p style="margin: 2px 0; font-size: 1.1em; color: white; font-weight: bold;">{alt['price']:.2f}</p>
-                            <p style="margin: 0; font-size: 0.75em; color: #d1d4dc;">{alt['time'].strftime('%H:%M')} | {alt['tf']}</p>
-                        </div>
-                        """, unsafe_allow_html=True)
-            else:
-                st.info("No session levels detected for today.")
+            st.info("No session levels detected for today.")
 
             st.markdown("---")
             st.markdown("### 🎯 ICT Entry Signals")
+
             st.caption("Auto-detected via Quant Engine")
             
             if all_signals:
