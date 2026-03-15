@@ -274,8 +274,14 @@ if df is not None and not df.empty:
     ith_itl_alerts = []
     current_day = df.index[-1].date()
     
+    # [LOGGING] Start of Level Plotting
+    print(f"[DEBUG] HTF Levels Count: {len(htf_levels)}")
+    
     for level in htf_levels:
         if pd.isna(level['price']): continue
+        
+        # [LOGGING] Detail
+        print(f"[DEBUG] Plotting {level['tf']} {level['type']} at {level['price']}")
         
         # Color & Visibility mapping
         color = "rgba(155, 89, 182, 0.9)" if level['type'] == 'ITH' else "rgba(52, 152, 219, 0.9)"
@@ -320,9 +326,14 @@ if df is not None and not df.empty:
             })
 
 
+    # [LOGGING] Signal Analysis Entry
+    print(f"[DEBUG] Processing {len(global_entries)} total entries for {timeframe}")
+    
     # 3.2 Plot Global Entries on Current Chart (Session Only & Distilled)
     plotted_times = set()
     for entry in global_entries:
+        # [LOGGING] Entry Details
+        print(f"[DEBUG] Processing entry: {entry}")
         if entry['time'] >= df.index[0] and entry['time'] <= df.index[-1]:
             hour = entry['time'].hour
             if 7 <= hour < 20:
