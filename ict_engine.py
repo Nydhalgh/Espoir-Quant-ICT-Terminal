@@ -96,61 +96,130 @@ class ICTEngine:
         return pd.DataFrame({'type': ifvg, 'top': tops, 'btm': btms}, index=df.index)
 
     def compute_mtf_signals(self, primary_df, htf_dfs, timeframe):
-        """Unified MTF Signal Engine with finite visibility and cross-TF filters."""
+        """
+        Refined MTF Logic:
+        - Uses 5-candle fractals (less noise).
+        - Consumes sweeps (1 trade per setup).
+        - Strict 60-minute window between sweep and entry.
+        """
+        htf_levels_list = []
+        htf_sweeps = []
         now = primary_df.index[-1]
         cutoff = now - pd.Timedelta(days=3)
-        levels_to_draw, entry_markers = [], []
         
-        # 1. Structural Hierarchy Analysis
-        # Only show levels >= current timeframe
-        tf_rank = {"M1": 0, "M5": 1, "M15": 2, "M30": 3, "H1": 4}
-        curr_rank = tf_rank.get(timeframe, 0)
-        
-        # Include primary in analysis
-        all_dfs = htf_dfs.copy()
-        all_dfs[timeframe] = primary_df
-        
-        htf_sweeps = []
-        for tf, hdf in all_dfs.items():
-            if hdf.empty or tf_rank.get(tf, 0) < curr_rank: continue
-            
-            fvg = self.find_fvgs(hdf)
-            shl = self.swing_highs_lows(hdf, swing_length=5)
-            ith_itl = self.ith_itl(hdf, shl, fvg)
-            
-            for t, row in ith_itl.dropna(subset=['Level']).iterrows():
-                if t < cutoff: continue
-                is_swept = row['SweptIndex'] > 0
-                end_t = hdf.index[int(row['SweptIndex'])] if is_swept else now
-                
-                # Filter: Unswept or very recent sweep (4h)
-                if not is_swept or end_t > now - pd.Timedelta(hours=4):
-                    levels_to_draw.append({
-                        'time': t, 'end_time': end_t, 'price': row['Level'], 
-                        'type': 'ITH' if row['Type'] == 1 else 'ITL', 'tf': tf, 'is_swept': is_swept
-                    })
-                
-                if is_swept and tf != timeframe: 
-                    htf_sweeps.append({'time': end_t, 'type': 'short' if row['Type'] == 1 else 'long'})
-
-        # 2. M1 Execution Logic
         exec_df = htf_dfs.get('M1', primary_df if timeframe == 'M1' else pd.DataFrame())
-        if not exec_df.empty and htf_sweeps:
-            ifvgs = self.find_ifvgs(exec_df)
-            sweeps_df = pd.DataFrame(htf_sweeps)
+        if exec_df.empty:
+            exec_df = primary_df 
             
-            for i_t, i_row in ifvgs[ifvgs['type'] != 0].iterrows():
-                # Session: 7:00 - 20:00 CET
-                if not (7 <= i_t.hour < 20): continue
-                
-                recent_sweeps = sweeps_df[(sweeps_df['time'] < i_t) & (sweeps_df['time'] > i_t - pd.Timedelta(hours=6))]
-                is_long = i_row['type'] == 1 and (recent_sweeps['type'] == 'long').any()
-                is_short = i_row['type'] == -1 and (recent_sweeps['type'] == 'short').any()
-                
-                if is_long or is_short:
-                    entry_markers.append({'time': i_t, 'type': 'LONG' if is_long else 'SHORT'})
+        current_price = exec_df['Close'].iloc[-1]
 
-        return {'global_entries': entry_markers, 'htf_levels': levels_to_draw}
+        # 1. Identify all Structural Levels (H1, M30, M15)
+        for tf, hdf in htf_dfs.items():
+            if hdf.empty or tf == 'M1': continue
+            
+            fvg_data = self.find_fvgs(hdf)
+            shl_data = self.swing_highs_lows(hdf, swing_length=5)
+            ith_data = self.ith_itl(hdf, shl_data, fvg_data)
+            
+            active_levels = ith_data.dropna(subset=['Level'])
+            
+            for t, row in active_levels.iterrows():
+                if t < cutoff: continue
+                
+                val = row['Type']
+                price = row['Level']
+                sweep_idx = row['SweptIndex']
+                is_swept = not pd.isna(sweep_idx)
+                
+                end_time = hdf.index[int(sweep_idx)] if is_swept else now
+                
+                dist_pct = abs(price - current_price) / current_price
+                is_recently_swept = is_swept and (now - end_time) < pd.Timedelta(hours=24)
+                is_close_active = not is_swept and dist_pct < 0.015
+                
+                if is_recently_swept or is_close_active:
+                    htf_levels_list.append({
+                        'time': t, 'end_time': end_time, 'price': price, 
+                        'type': 'ITH' if val == 1 else 'ITL', 'tf': tf, 'is_swept': is_swept
+                    })
+                    
+                if is_swept:
+                    htf_sweeps.append({'time': end_time, 'type': 'short' if val == 1 else 'long'})
+
+        # 2. Local Levels (Primary TF) filtering applies here too
+        p_fvg = self.find_fvgs(primary_df)
+        p_shl = self.swing_highs_lows(primary_df, swing_length=5)
+        p_ith_data = self.ith_itl(primary_df, p_shl, p_fvg)
+        
+        for t, row in p_ith_data.dropna(subset=['Level']).iterrows():
+            if t < cutoff: continue
+            
+            val = row['Type']
+            price = row['Level']
+            sweep_idx = row['SweptIndex']
+            is_swept = not pd.isna(sweep_idx)
+            
+            end_time = primary_df.index[int(sweep_idx)] if is_swept else now
+            dist_pct = abs(price - current_price) / current_price
+            
+            is_recently_swept = is_swept and (now - end_time) < pd.Timedelta(hours=24)
+            is_close_active = not is_swept and dist_pct < 0.015
+            
+            if is_recently_swept or is_close_active:
+                if not any(l['price'] == price for l in htf_levels_list):
+                    htf_levels_list.append({
+                        'time': t, 'end_time': end_time, 'price': price, 
+                        'type': 'ITH' if val == 1 else 'ITL', 'tf': timeframe, 'is_primary': True, 'is_swept': is_swept
+                    })
+
+        # 3. M1/M5 Entry Confirmation (STRICT One-Trade-Per-Sweep Logic)
+        global_entries = []
+        if not exec_df.empty and htf_sweeps:
+            exec_ifvgs = self.find_ifvgs(exec_df)
+            active_ifvgs = exec_ifvgs[exec_ifvgs['type'] != 0]
+            
+            sweeps_df = pd.DataFrame(htf_sweeps).sort_values('time').drop_duplicates('time')
+            
+            consumed_sweeps = set()
+            
+            for i_time, i_row in active_ifvgs.iterrows():
+                hour = i_time.hour
+                
+                is_london = 7 <= hour < 12
+                is_ny = 13 <= hour < 17
+                if not (is_london or is_ny):
+                    continue
+                    
+                lookback = i_time - pd.Timedelta(minutes=90)
+                recent_sweeps = sweeps_df[(sweeps_df['time'] < i_time) & (sweeps_df['time'] >= lookback)]
+                
+                if recent_sweeps.empty: continue
+                
+                if i_row['type'] == 1:
+                    long_sweeps = recent_sweeps[recent_sweeps['type'] == 'long']
+                    unconsumed = [s for s in long_sweeps['time'] if s not in consumed_sweeps]
+                    
+                    if unconsumed:
+                        global_entries.append({
+                            'time': i_time, 'price': exec_df.loc[i_time, 'Close'], 'type': 'LONG'
+                        })
+                        consumed_sweeps.add(unconsumed[-1])
+                
+                elif i_row['type'] == -1:
+                    short_sweeps = recent_sweeps[recent_sweeps['type'] == 'short']
+                    unconsumed = [s for s in short_sweeps['time'] if s not in consumed_sweeps]
+                    
+                    if unconsumed:
+                        global_entries.append({
+                            'time': i_time, 'price': exec_df.loc[i_time, 'Close'], 'type': 'SHORT'
+                        })
+                        consumed_sweeps.add(unconsumed[-1])
+                        
+        # FIX: Filter levels for low timeframes (M1, M5) to show only the 3 most recent
+        if timeframe in ['M1', 'M5']:
+            htf_levels_list = sorted(htf_levels_list, key=lambda x: x['time'], reverse=True)[:3]
+                        
+        return {'global_entries': global_entries, 'htf_levels': htf_levels_list}
 
     def swing_highs_lows(self, ohlc, swing_length=5):
         high, low = ohlc['High'].values, ohlc['Low'].values
